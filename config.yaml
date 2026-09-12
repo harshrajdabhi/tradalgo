@@ -1,0 +1,48 @@
+capital:
+  initial_capital: 20000
+  max_risk_pct: 0.03
+  max_leverage: 5
+  fallback_leverage: 3
+  fixed_cost_rupees: 50
+  max_trades_per_day: 2
+  daily_loss_limit_r: 2
+
+screener:
+  shortlist_size: 6
+  min_avg_turnover_cr: 50
+  min_price: 50
+  factor_weights:
+    momentum_trend: 0.20
+    relative_strength: 0.15
+    volatility: 0.15
+    relative_volume: 0.15
+    structure: 0.15
+    level_proximity: 0.10
+    news_sentiment: 0.10
+
+market:
+  timezone: Asia/Kolkata
+  open: "09:15"
+  close: "15:30"
+  no_new_entries_after: "14:00"
+  hard_exit: "15:00"
+
+strategies:
+  orb:            {enabled: true, window_start: "09:30", window_end: "11:00"}
+  gap:            {enabled: true, window_start: "09:20", window_end: "10:15"}
+  vwap:           {enabled: true, window_start: "09:30", window_end: "14:00"}
+  pdhl:           {enabled: true, window_start: "09:30", window_end: "14:00"}
+  pullback:       {enabled: true, window_start: "09:30", window_end: "14:00"}
+  range_breakout: {enabled: true, window_start: "09:30", window_end: "14:00"}
+
+position_management:
+  partial_exit_at_r: 2.0
+  partial_exit_fraction: 0.6
+  trail_method: swing_structure
+
+backtest:
+  slippage_pct: 0.05
+
+paths:
+  data_dir: data
+  static_dir: data_static
