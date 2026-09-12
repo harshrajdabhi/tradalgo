@@ -22,6 +22,9 @@ screener:
     structure: 0.15
     level_proximity: 0.10
     news_sentiment: 0.10
+  stop_atr_frac: 0.3
+  trigger_zone_atr: 0.25
+  min_room_r: 2.0
 
 market:
   timezone: Asia/Kolkata
@@ -45,6 +48,24 @@ position_management:
 
 backtest:
   slippage_pct: 0.05
+
+risk:
+  win_prob: 0.40
+  runner_avg_r: 2.0
+  min_room_r: 2.0
+  band_fraction_r: 0.1
+  trail_bars: 3
+
+preopen:
+  max_gap_atr: 0.75
+  oppose_gap_atr: 0.5
+
+telegram:
+  enabled: true   # token and chat id live in macOS Keychain (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+
+dashboard:
+  host: 127.0.0.1
+  port: 8501
 
 paths:
   data_dir: data

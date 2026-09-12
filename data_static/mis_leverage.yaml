@@ -1,0 +1,14 @@
+# Per-symbol MIS (intraday) leverage overrides.
+#
+# FYERS' free API has no margin/leverage endpoint that doesn't also require the
+# funds/order APIs, which this app never touches. Fill this in by hand from your
+# broker's published MIS margin sheet (e.g. FYERS "Span/Margin calculator" or the
+# MIS leverage table on their website), one entry per symbol you want to override.
+# Any symbol not listed here uses `capital.max_leverage` from config.yaml, capped
+# the same way. Values here are also capped at `capital.max_leverage` by the caller.
+#
+# Example:
+# overrides:
+#   RELIANCE: 4
+#   TATASTEEL: 5
+overrides: {}

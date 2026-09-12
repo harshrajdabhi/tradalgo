@@ -29,6 +29,9 @@ class ScreenerConfig(BaseModel):
     min_avg_turnover_cr: float = Field(ge=0)
     min_price: float = Field(ge=0)
     factor_weights: dict[str, float]
+    stop_atr_frac: float = Field(default=0.3, gt=0)
+    trigger_zone_atr: float = Field(default=0.25, gt=0)
+    min_room_r: float = Field(default=2.0, gt=0)
 
     @model_validator(mode="after")
     def _check_weights(self):
@@ -71,6 +74,37 @@ class BacktestConfig(BaseModel):
     slippage_pct: float = Field(ge=0)
 
 
+class RiskTuning(BaseModel):
+    win_prob: float = Field(default=0.40, gt=0, lt=1)
+    runner_avg_r: float = Field(default=2.0, gt=0)
+    min_room_r: float = Field(default=2.0, gt=0)
+    band_fraction_r: float = Field(default=0.1, gt=0)
+    trail_bars: int = Field(default=3, ge=1)
+
+
+class PreopenConfig(BaseModel):
+    max_gap_atr: float = Field(default=0.75, gt=0)
+    oppose_gap_atr: float = Field(default=0.5, gt=0)
+
+
+class TelegramConfig(BaseModel):
+    enabled: bool = True
+
+
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+class DashboardConfig(BaseModel):
+    host: str = "127.0.0.1"
+    port: int = Field(default=8501, ge=1, le=65535)
+
+    @model_validator(mode="after")
+    def _check_loopback(self):
+        if self.host not in LOOPBACK_HOSTS:
+            raise ValueError(f"dashboard.host must be a loopback address, got {self.host!r}")
+        return self
+
+
 class PathsConfig(BaseModel):
     data_dir: Path
     static_dir: Path
@@ -92,6 +126,10 @@ class Settings(BaseModel):
     strategies: dict[str, StrategyConfig]
     position_management: PositionConfig
     backtest: BacktestConfig
+    risk: RiskTuning = RiskTuning()
+    preopen: PreopenConfig = PreopenConfig()
+    telegram: TelegramConfig = TelegramConfig()
+    dashboard: DashboardConfig = DashboardConfig()
     paths: PathsConfig
 
     @model_validator(mode="after")
@@ -107,6 +145,15 @@ class Settings(BaseModel):
 def load_settings(path: str | Path = "config.yaml") -> Settings:
     with open(path) as f:
         return Settings.model_validate(yaml.safe_load(f))
+
+
+def load_leverage_overrides(static_dir: str | Path) -> dict[str, float]:
+    path = Path(static_dir) / "mis_leverage.yaml"
+    if not path.exists():
+        return {}
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+    return dict((data.get("overrides") or {}))
 
 
 def get_secret(name: str) -> str:

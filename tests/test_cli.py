@@ -17,5 +17,5 @@ def test_init_creates_db_with_all_tables(tmp_path, raw_config):
 
 
 def test_unimplemented_command_exits_nonzero(capsys):
-    assert main(["screen"]) == 2
+    assert main(["session"]) == 2
     assert "not implemented" in capsys.readouterr().err

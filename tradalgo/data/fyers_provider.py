@@ -7,6 +7,7 @@ from tradalgo.data.base import INDEX_SYMBOL, TZ, ProviderError, Resolution, norm
 
 FYERS_RESOLUTION = {"5m": "5", "15m": "15", "1d": "1D"}
 MAX_DAYS_PER_REQUEST = {"5m": 100, "15m": 100, "1d": 366}
+QUOTES_BATCH_SIZE = 50
 
 
 def to_fyers_symbol(symbol: str) -> str:
@@ -46,6 +47,25 @@ class FyersProvider:
             if chunk_start <= end:
                 self._sleep(self._min_interval)
         return candles_from_rows(rows)
+
+    def get_quotes(self, symbols: list[str]) -> dict[str, float]:
+        """Last traded price per symbol, e.g. for the 09:08 pre-open pass. Missing symbols are omitted."""
+        by_fyers_symbol = {to_fyers_symbol(s): s for s in symbols}
+        out: dict[str, float] = {}
+        fyers_symbols = list(by_fyers_symbol)
+        for i in range(0, len(fyers_symbols), QUOTES_BATCH_SIZE):
+            batch = fyers_symbols[i:i + QUOTES_BATCH_SIZE]
+            resp = self._client.quotes(data={"symbols": ",".join(batch)})
+            if resp.get("s") != "ok":
+                raise ProviderError(f"FYERS quotes failed: {resp.get('message', resp)}")
+            for item in resp.get("d", []):
+                symbol = by_fyers_symbol.get(item.get("n"))
+                lp = (item.get("v") or {}).get("lp")
+                if symbol is not None and lp is not None:
+                    out[symbol] = float(lp)
+            if i + QUOTES_BATCH_SIZE < len(fyers_symbols):
+                self._sleep(self._min_interval)
+        return out
 
 
 def candles_from_rows(rows: list[list]) -> pd.DataFrame:
