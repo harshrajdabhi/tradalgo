@@ -134,6 +134,30 @@ def test_send_pending_stops_retrying_after_max_attempts(engine):
     assert counts == {"sent": 0, "failed": 0}
 
 
+def test_send_pending_persists_no_token_in_last_error_on_http_failure(engine):
+    import requests
+
+    from tradalgo.notify.telegram import TelegramClient
+
+    class LeakySession:
+        def post(self, url, json, timeout):
+            raise requests.ConnectionError(
+                "HTTPSConnectionPool(host='api.telegram.org', port=443): "
+                "Max retries exceeded with url: /botTOP_SECRET_TOKEN/sendMessage (Caused by ...)"
+            )
+
+    plan = make_plan()
+    alert_id = sender.enqueue_entry_alert(engine, plan, None, False, NOW)
+    client = TelegramClient(token="TOP_SECRET_TOKEN", chat_id="123", http=LeakySession())
+    clock = FixedClock(NOW)
+    counts = sender.send_pending(engine, client, clock)
+    assert counts == {"sent": 0, "failed": 1}
+    with engine.connect() as conn:
+        row = conn.execute(select(alerts).where(alerts.c.id == alert_id)).mappings().one()
+    assert row["status"] == "failed"
+    assert "TOP_SECRET_TOKEN" not in (row["last_error"] or "")
+
+
 def test_enqueue_event_alert(engine):
     event = PositionEvent(
         kind="stop_hit", trade_id=1, symbol="SBIN", strategy="orb", ts=NOW,

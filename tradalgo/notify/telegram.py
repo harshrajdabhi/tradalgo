@@ -22,15 +22,21 @@ class TelegramClient:
     def _call(self, method: str, payload: dict) -> dict:
         try:
             resp = self.http.post(self._url(method), json=payload, timeout=self.timeout)
-        except requests.RequestException as exc:
-            raise TelegramError(f"HTTP error calling {method}: {exc}") from None
+        except requests.RequestException:
+            # Never str(exc) here: requests/urllib3 embed the full request URL
+            # (which contains the bot token) in connection/timeout error text.
+            raise TelegramError(f"HTTP error calling {method}") from None
         try:
             data = resp.json()
         except ValueError:
             raise TelegramError(f"non-JSON response from {method} (status {resp.status_code})") from None
         if not data.get("ok"):
-            raise TelegramError(data.get("description", f"Telegram API error calling {method}"))
+            description = data.get("description", f"Telegram API error calling {method}")
+            raise TelegramError(self._redact(description))
         return data["result"]
+
+    def _redact(self, message: str) -> str:
+        return message.replace(self._token, "<token>")
 
     @staticmethod
     def _keyboard(buttons: list[list[tuple[str, str]]] | None) -> dict | None:

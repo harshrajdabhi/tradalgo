@@ -100,3 +100,30 @@ def test_token_never_appears_in_exception_message():
     with pytest.raises(TelegramError) as excinfo:
         client.send_message("hi")
     assert "TOP_SECRET" not in str(excinfo.value)
+
+
+def test_token_never_appears_in_ok_false_description_that_echoes_url():
+    client, _ = make_client(
+        [FakeResponse({"ok": False, "description": "bad request to https://api.telegram.org/botTOP_SECRET/sendMessage"})],
+        token="TOP_SECRET",
+    )
+    with pytest.raises(TelegramError) as excinfo:
+        client.send_message("hi")
+    assert "TOP_SECRET" not in str(excinfo.value)
+
+
+def test_token_never_appears_in_http_exception_message():
+    import requests
+
+    class LeakySession:
+        def post(self, url, json, timeout):
+            # requests/urllib3 embed the full request URL (with token) in real errors
+            raise requests.ConnectionError(
+                f"HTTPSConnectionPool(host='api.telegram.org', port=443): "
+                f"Max retries exceeded with url: /botTOP_SECRET/sendMessage (Caused by ...)"
+            )
+
+    client = TelegramClient(token="TOP_SECRET", chat_id="123", http=LeakySession())
+    with pytest.raises(TelegramError) as excinfo:
+        client.send_message("hi")
+    assert "TOP_SECRET" not in str(excinfo.value)
