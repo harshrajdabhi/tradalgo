@@ -13,7 +13,7 @@ engine = get_engine(settings)
 
 @st.cache_data(ttl=15)
 def _positions(_engine):
-    return queries.positions(_engine)
+    return queries.trade_positions(_engine)
 
 
 @st.fragment(run_every=15)
@@ -28,15 +28,14 @@ def render() -> None:
     choice = st.selectbox("Chart a position", options=range(len(df)), format_func=lambda i: labels[i])
     row = df.iloc[choice]
 
+    # CandleCache.load returns an empty frame when nothing is cached for this symbol yet —
+    # that is the only expected "no data" case. Any other error (bad parquet, etc.) should surface.
+    cache = CandleCache(settings.paths.data_dir / "candles", provider=None)
+    candles = cache.load(row["symbol"], "5m")
     day_candles = None
-    try:
-        cache = CandleCache(settings.paths.data_dir / "candles", provider=None)
-        candles = cache.load(row["symbol"], "5m")
-        if not candles.empty:
-            target_date = pd.Timestamp(row["entry_ts"]).date()
-            day_candles = candles[candles.index.date == target_date]
-    except Exception:
-        day_candles = None
+    if not candles.empty:
+        target_date = pd.Timestamp(row["entry_ts"]).date()
+        day_candles = candles[candles.index.date == target_date]
 
     if day_candles is not None and not day_candles.empty:
         fig = charts.candlestick_with_levels(

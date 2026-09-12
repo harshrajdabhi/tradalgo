@@ -29,7 +29,7 @@ def signals_with_decisions(engine: Engine, trade_date: str) -> pd.DataFrame:
     """, {"d": trade_date})
 
 
-def positions(engine: Engine) -> pd.DataFrame:
+def trade_positions(engine: Engine) -> pd.DataFrame:
     return _read(engine, """
         SELECT p.id AS trade_id, p.signal_id, p.taken_by_user, p.entry_ts, p.entry_price, p.qty,
                p.partial_exit_ts, p.partial_exit_price, p.exit_ts, p.exit_price, p.exit_reason,
@@ -164,6 +164,8 @@ def live_vs_backtest_expectancy(engine: Engine) -> pd.DataFrame:
 
 
 def latest_job_runs(engine: Engine) -> pd.DataFrame:
+    # MAX(id) picks the latest row per job; relies on job_runs.id being an autoincrement PK
+    # (monotonically increasing with insert order), which it is per storage/schema.py.
     return _read(engine, """
         SELECT job, run_date, started_at, finished_at, status, error
         FROM job_runs j

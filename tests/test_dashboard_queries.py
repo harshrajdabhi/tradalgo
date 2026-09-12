@@ -97,9 +97,9 @@ def test_signals_with_decisions():
     assert df.iloc[0]["accepted"] == 1
 
 
-def test_positions():
+def test_trade_positions():
     engine = make_seeded_engine()
-    df = queries.positions(engine)
+    df = queries.trade_positions(engine)
     assert len(df) == 1
     assert df.iloc[0]["net_r"] == 1.9
     assert df.iloc[0]["user_action"] == "taken"

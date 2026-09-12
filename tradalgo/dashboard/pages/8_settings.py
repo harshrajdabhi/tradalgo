@@ -1,3 +1,4 @@
+import copy
 import os
 
 import streamlit as st
@@ -39,7 +40,7 @@ if current is not None:
         save = st.form_submit_button("Save")
 
     if save:
-        new_config = dict(current)
+        new_config = copy.deepcopy(current)
         new_config["capital"] = dict(current["capital"], initial_capital=initial_capital,
                                      max_risk_pct=max_risk_pct)
         new_config["screener"] = dict(current["screener"], shortlist_size=shortlist_size)

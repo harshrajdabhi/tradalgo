@@ -67,7 +67,7 @@ def render_runs() -> None:
 
 render_runs()
 
-runs_df = queries.backtest_runs_list(engine)
+runs_df = _runs(engine)
 if not runs_df.empty:
     run_id = st.selectbox("Select run", options=runs_df["id"].tolist())
     metrics = queries.backtest_run_metrics(engine, run_id)
