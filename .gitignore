@@ -10,3 +10,4 @@ data/
 .superpowers/
 .worktrees/
 .DS_Store
+.claude/worktrees/
