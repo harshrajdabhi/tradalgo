@@ -1,0 +1,72 @@
+from datetime import date, datetime, timedelta
+
+import pytest
+
+from tradalgo.clock import IST
+from tradalgo.config import CapitalConfig
+from tradalgo.risk.limits import DailyRiskState
+from tradalgo.risk.plan import Rejection, TradePlan
+from tradalgo.risk.validator import validate
+from tradalgo.strategies.base import Regime, Signal
+
+TS = datetime(2026, 9, 11, 10, 0, tzinfo=IST)
+CFG = CapitalConfig(initial_capital=20000, max_risk_pct=0.03, max_leverage=5, fallback_leverage=3,
+                    fixed_cost_rupees=50, max_trades_per_day=2, daily_loss_limit_r=2)
+
+
+def sig(direction="long", entry=100.0, stop=98.0, symbol="SBIN", strategy="orb"):
+    return Signal(symbol, strategy, direction, TS, entry, stop, Regime.TREND_UP, Regime.TREND_UP, False, "t")
+
+
+def run(signal, capital=20000.0, symbol_leverage=None, levels=(), state=None, **kw):
+    return validate(signal, capital=capital, capital_cfg=CFG, symbol_leverage=symbol_leverage,
+                    levels=list(levels), limits_state=state or DailyRiskState(date(2026, 9, 11)), **kw)
+
+
+def test_accepted_long_exact_numbers():
+    p = run(sig(), symbol_leverage=None, levels=[105.0, 97.0, 100.0, 101.0 - 10])
+    assert isinstance(p, TradePlan)
+    assert p.qty == 300 and p.leverage_used == 3.0
+    assert p.margin_required == pytest.approx(10000.0)
+    assert p.risk_rupees == 600.0
+    assert (p.target_2r, p.target_3r) == (104.0, 106.0)
+    assert p.est_cost == 50.0
+    assert p.room_to_level_r == 2.5
+    assert p.expected_value_r == pytest.approx(0.4 * 2.0 - 0.6 - 50 / 600)
+    assert (p.limit_low, p.limit_high) == pytest.approx((100.0, 100.2))
+    assert p.valid_until == TS + timedelta(minutes=10)
+
+
+def test_accepted_short_exact_numbers():
+    p = run(sig("short", 200.0, 204.0), symbol_leverage=2.0, levels=[210.0, 190.0, 180.0])
+    assert isinstance(p, TradePlan)
+    assert p.qty == 150 and p.leverage_used == 2.0
+    assert p.margin_required == pytest.approx(15000.0)
+    assert p.risk_rupees == 600.0
+    assert (p.target_2r, p.target_3r) == (192.0, 188.0)
+    assert p.room_to_level_r == 2.5
+    assert (p.limit_low, p.limit_high) == pytest.approx((199.6, 200.0))
+
+
+def test_no_opposing_level_is_finite():
+    p = run(sig(), levels=[90.0])
+    assert isinstance(p, TradePlan) and p.room_to_level_r == 99.0
+
+
+@pytest.mark.parametrize(
+    "kwargs, reason",
+    [
+        (dict(signal=sig(), state=DailyRiskState(date(2026, 9, 11), trades_taken=2)), "max trades"),
+        (dict(signal=sig(), state=DailyRiskState(date(2026, 9, 11), realized_r=-2.0)), "daily loss limit"),
+        (dict(signal=sig(entry=100.0, stop=50.0), capital=1000.0), "qty"),
+        (dict(signal=sig(), levels=[103.0]), "room"),
+        (dict(signal=sig("short", 200.0, 204.0), levels=[195.0]), "room"),
+        (dict(signal=sig(), win_prob=0.3), "expected value"),
+        (dict(signal=sig(entry=100.0, stop=99.0), capital=1000.0), "expected value"),  # 30 qty -> cost_r 1.67
+    ],
+)
+def test_rejections(kwargs, reason):
+    signal = kwargs.pop("signal")
+    r = run(signal, **kwargs)
+    assert isinstance(r, Rejection) and r.signal is signal
+    assert reason in r.reason
