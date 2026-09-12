@@ -1,8 +1,9 @@
 import math
 
 import pandas as pd
+import pytest
 
-from tests.strategy_fixtures import TODAY, frame, at, history_5m, prior_days, sessions_15m
+from tests.strategy_fixtures import TODAY, at, frame, history_5m, prior_days, resample_15m, sessions_15m
 from tradalgo.regime import classify
 from tradalgo.strategies.base import Regime
 
@@ -50,6 +51,35 @@ def test_high_vol_from_atr_pct_percentile():
     wild = frame(at(9, 15), [(100, 106, 94, 100 + (3 if i % 2 else -3), 1000) for i in range(6)])
     assert classify(c15, pd.concat([c5, wild])) == Regime.HIGH_VOL
     assert classify(c15, c5) == Regime.RANGE
+
+
+def u_session(day, scale=1.0, gap=0.0):
+    rows = []
+    for i in range(75):
+        half = scale * (1.0 if i < 4 or i > 70 else 0.5)
+        p = 100.0 + gap
+        rows.append((p, p + half, p - half, p + (0.05 if i % 2 else -0.05), 1000))
+    return frame(at(9, 15, day), rows)
+
+
+def u_history(today_scale):
+    days = prior_days(12)
+    parts = [u_session(d, gap=0.5 if j % 2 else -0.5) for j, d in enumerate(days)]
+    return pd.concat(parts + [u_session(TODAY, scale=today_scale, gap=0.5)])
+
+
+@pytest.mark.parametrize("hh, mm", [(9, 30), (9, 35), (9, 45), (10, 0)])
+def test_normal_open_volatility_is_not_high_vol(hh, mm):
+    c5 = u_history(1.0)
+    c5 = c5[c5.index + pd.Timedelta(minutes=5) <= at(hh, mm)]
+    c15 = resample_15m(c5)
+    assert classify(c15, c5) != Regime.HIGH_VOL
+
+
+def test_abnormal_session_is_high_vol():
+    c5 = u_history(3.0)
+    c5 = c5[c5.index + pd.Timedelta(minutes=5) <= at(10, 0)]
+    assert classify(resample_15m(c5), c5) == Regime.HIGH_VOL
 
 
 def test_not_enough_history_is_range():

@@ -28,6 +28,19 @@ def test_range_breakout_does_not_refire():
     assert range_breakout(ctx_at(with_today(rows), at(10, 5))) is None
 
 
+def test_range_breakout_failed_breakout_retest_does_not_refire():
+    rows = BOX + [TRIGGER, (100.5, 100.6, 100.0, 100.2, 1000), (100.2, 101.4, 100.1, 101.3, 2000)]
+    assert range_breakout(ctx_at(with_today(rows), at(10, 10))) is None
+
+
+def test_range_breakout_new_box_later_may_fire():
+    new_box = [(100.0, 100.3, 99.7, 100.1 if i % 2 else 99.9, 1000) for i in range(8)]
+    rows = BOX + [TRIGGER] + new_box + [TRIGGER]
+    sig = range_breakout(ctx_at(with_today(rows), at(10, 45)))
+    assert sig is not None and sig.direction == "long" and sig.ts == at(10, 40)
+    assert sig.stop_loss == pytest.approx(99.7) and sig.features["range_high"] == 100.3
+
+
 def test_range_breakout_no_lookahead():
     c5 = with_today(BOX + [TRIGGER])
     assert range_breakout(ctx_at(append_future(c5), at(10, 0))) == range_breakout(ctx_at(c5, at(10, 0)))

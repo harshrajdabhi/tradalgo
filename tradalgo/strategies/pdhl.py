@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from tradalgo.indicators import prev_day_hlc
 from tradalgo.strategies.base import MarketContext, Signal
-from tradalgo.strategies.orb import bounded_stop, last_atr, last_rvol, make_signal, today_bars
+from tradalgo.strategies.common import bounded_stop, last_atr, last_rvol, make_signal, today_bars
 
 
 @dataclass(frozen=True)
@@ -47,8 +47,14 @@ class PdhlDetector:
         rng = h - l
         if rng <= 0:
             return None
-        pierced_high = (earlier["high"] > pdh) & (earlier["close"] < pdh)
-        pierced_low = (earlier["low"] < pdl) & (earlier["close"] > pdl)
+        e_rng = (earlier["high"] - earlier["low"]).where(lambda r: r > 0)
+        e_body_hi = earlier[["open", "close"]].max(axis=1)
+        e_body_lo = earlier[["open", "close"]].min(axis=1)
+        # only an earlier *qualifying* rejection consumes the setup
+        pierced_high = (earlier["high"] > pdh) & (earlier["close"] < pdh) & (
+            (earlier["high"] - e_body_hi) / e_rng >= self.min_wick_ratio)
+        pierced_low = (earlier["low"] < pdl) & (earlier["close"] > pdl) & (
+            (e_body_lo - earlier["low"]) / e_rng >= self.min_wick_ratio)
         if h > pdh and c < pdh and (h - max(o, c)) / rng >= self.min_wick_ratio and not pierced_high.any():
             direction, structural, lvl = "short", h, "PDH"
         elif l < pdl and c > pdl and (min(o, c) - l) / rng >= self.min_wick_ratio and not pierced_low.any():

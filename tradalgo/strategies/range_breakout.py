@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 from tradalgo.strategies.base import MarketContext, Signal
-from tradalgo.strategies.orb import bounded_stop, last_atr, last_rvol, make_signal, today_bars
+from tradalgo.strategies.common import bounded_stop, last_atr, last_rvol, make_signal, today_bars
 
 
 @dataclass(frozen=True)
@@ -10,8 +10,7 @@ class RangeBreakoutDetector:
     """Box = the `bars` closed bars before the trigger (today only). Box is a consolidation when
     high - low <= range_atr_mult * k * ATR14(5m); k widens the 0.8 x ATR per-bar-ish budget over a multi-bar
     window (default 0.8 * 2.0 = 1.6 ATR across 6 bars). Trigger closes outside the box with RVOL >= min_rvol.
-    Stop = opposite box side, bounded. No re-fire: the bar before the trigger must itself have closed inside the
-    box formed by the `bars` bars before it (the trigger bar breaks that on the next cycle)."""
+    Stop = opposite box side, bounded. At most one signal per box: see _box_contains_breakout."""
     name: str = "range_breakout"
     counter_trend: bool = False
     bars: int = 6
@@ -26,15 +25,13 @@ class RangeBreakoutDetector:
     def __call__(self, ctx: MarketContext) -> Signal | None:
         today = today_bars(ctx)
         atr5 = last_atr(ctx.candles_5m, self.atr_period)
-        if today is None or atr5 is None or len(today) < self.bars + 2:
+        if today is None or atr5 is None or len(today) < self.bars + 1:
             return None
         box = today.iloc[-1 - self.bars:-1]
         hi, lo = float(box["high"].max()), float(box["low"].min())
         if hi - lo > self.range_atr_mult * self.k * atr5:
             return None
-        prior = today.iloc[-2 - self.bars:-2]
-        prev_close = float(today["close"].iloc[-2])
-        if not (prior["low"].min() <= prev_close <= prior["high"].max()):
+        if self._box_contains_breakout(today):
             return None
         c = float(today["close"].iloc[-1])
         if c > hi:
@@ -51,6 +48,17 @@ class RangeBreakoutDetector:
                            f"Range breakout {direction}: close outside {self.bars}-bar box "
                            f"{lo:.2f}-{hi:.2f} with RVOL {rvol:.1f}",
                            rvol=rvol, atr5=atr5, range_high=hi, range_low=lo)
+
+    def _box_contains_breakout(self, today) -> bool:
+        """True if any box bar (with a full window before it today) closed outside the `bars` bars before it.
+        A box holding an earlier breakout bar is the same, already-broken setup; this blocks the trigger's next bar
+        and a failed-breakout retest from firing again, while a fresh box of inside bars can still fire."""
+        h, l, c = (today[k].to_numpy() for k in ("high", "low", "close"))
+        n = len(today)
+        for j in range(max(self.bars, n - 1 - self.bars), n - 1):
+            if not (l[j - self.bars:j].min() <= c[j] <= h[j - self.bars:j].max()):
+                return True
+        return False
 
 
 range_breakout = RangeBreakoutDetector()

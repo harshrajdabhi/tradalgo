@@ -2,7 +2,8 @@ import pytest
 
 from tests.strategy_fixtures import append_future, at, ctx_at, with_today
 from tradalgo.indicators import atr
-from tradalgo.strategies.orb import bounded_stop, orb
+from tradalgo.strategies.common import bounded_stop
+from tradalgo.strategies.orb import orb
 
 OR_ROWS = [
     (100.0, 100.8, 99.6, 100.4, 1000),

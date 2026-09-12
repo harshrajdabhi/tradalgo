@@ -9,6 +9,7 @@ from tests.test_strategies_orb import OR_ROWS, TRIGGER
 from tests.test_strategies_pdhl import BASE, REJECTION
 from tradalgo.clock import MarketCalendar, load_holidays
 from tradalgo.strategies.base import Regime, Signal
+from tradalgo.strategies.orb import orb
 from tradalgo.strategies.registry import ALL_DETECTORS, REGIME_STRATEGIES, detect_all, market_alignment_ok
 
 UP, DOWN = Regime.TREND_UP, Regime.TREND_DOWN
@@ -53,6 +54,11 @@ def test_regime_gating(settings, calendar):
 
 def test_long_blocked_in_down_market(settings, calendar):
     assert "orb" not in names(detect_all(orb_ctx(market=DOWN), settings, calendar))
+
+
+def test_long_blocked_in_stock_down_trend(settings, calendar):
+    assert orb(orb_ctx(regime=DOWN, market=UP)).direction == "long"
+    assert "orb" not in names(detect_all(orb_ctx(regime=DOWN, market=UP), settings, calendar))
 
 
 def test_counter_trend_short_exempt_in_up_market(settings, calendar):

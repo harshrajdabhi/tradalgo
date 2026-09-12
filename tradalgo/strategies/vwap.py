@@ -5,7 +5,7 @@ import numpy as np
 
 from tradalgo.indicators import session_vwap
 from tradalgo.strategies.base import MarketContext, Regime, Signal
-from tradalgo.strategies.orb import bounded_stop, last_atr, make_signal, today_bars
+from tradalgo.strategies.common import bounded_stop, last_atr, make_signal, today_bars
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,8 @@ class VwapDetector:
             return None
         n = len(today)
         vw = session_vwap(ctx.candles_5m).iloc[-n:].to_numpy()
-        if np.isnan(vw).any():
+        # only the last two bars must have a VWAP; a zero-volume open bar must not disable the whole day
+        if np.isnan(vw[-2:]).any():
             return None
         o, h, l, c = (today[k].to_numpy() for k in ("open", "high", "low", "close"))
         v = vw[-1]

@@ -5,7 +5,7 @@ import numpy as np
 
 from tradalgo.indicators import ema
 from tradalgo.strategies.base import MarketContext, Signal
-from tradalgo.strategies.orb import bounded_stop, last_atr, make_signal, today_bars
+from tradalgo.strategies.common import bounded_stop, last_atr, make_signal, today_bars
 
 
 @dataclass(frozen=True)
