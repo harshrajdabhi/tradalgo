@@ -67,3 +67,12 @@ def test_kill_switch(tmp_path):
     assert not kill_switch_active(tmp_path)
     (tmp_path / "KILL").touch()
     assert kill_switch_active(tmp_path)
+
+
+def test_float_accumulated_loss_trips_limit():
+    s = DailyRiskState(date(2026, 9, 11), realized_r=-1.2 + -0.7999999999999)
+    assert "daily loss limit" in check_limits(s, sig(), 3, 2.0)
+
+
+def test_stale_state_rejected():
+    assert "stale" in check_limits(DailyRiskState(date(2026, 9, 10)), sig(), 2, 2.0)

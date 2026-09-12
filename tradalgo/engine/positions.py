@@ -45,8 +45,7 @@ class PositionManager:
     """Pure in-memory exit state machine shared by live session and backtest.
 
     Updates for a trade are ordered by (ts, bar_closed); anything not strictly newer is ignored, so
-    replays are idempotent. When mixing ticks and bars, pass bars with a ts no older than the ticks
-    already processed (e.g. the bar's close time).
+    replays are idempotent.
     """
 
     def __init__(self, partial_fraction: float = 0.6, trail_bars: int = 3, hard_exit: time = time(15, 0)):
@@ -67,13 +66,15 @@ class PositionManager:
     def open_trades(self) -> list[ManagedTrade]:
         return [t for t in self._trades.values() if not t.closed]
 
-    def on_price(self, ts: datetime, high: float, low: float, close: float, bar_closed: bool) -> list[PositionEvent]:
+    def on_price(self, ts: datetime, high: float, low: float, close: float, bar_closed: bool,
+                 open: float | None = None) -> list[PositionEvent]:
+        """Ticks carry tick time; closed bars MUST be stamped with bar CLOSE time (start + 5 min)."""
         events: list[PositionEvent] = []
         for t in self.open_trades():
             if t.last_ts is not None and (ts, bar_closed) <= (datetime.fromisoformat(t.last_ts), t.last_closed):
                 continue
             t.last_ts, t.last_closed = ts.isoformat(), bar_closed
-            events += self._update(t, ts, high, low, close, bar_closed)
+            events += self._update(t, ts, high, low, close, bar_closed, close if open is None else open)
         return events
 
     def _event(self, t: ManagedTrade, kind, ts, price, qty, new_stop=None) -> PositionEvent:
@@ -89,10 +90,12 @@ class PositionManager:
         up = t.long == favorable
         return high >= level if up else low <= level
 
-    def _update(self, t: ManagedTrade, ts, high, low, close, bar_closed) -> list[PositionEvent]:
+    def _update(self, t: ManagedTrade, ts, high, low, close, bar_closed, open_) -> list[PositionEvent]:
         # Stop is checked first: a bar touching both stop and target counts as stop-first (conservative).
         if self._touches(t, t.stop, high, low, favorable=False):
-            return [self._exit(t, "stop_hit", ts, t.stop)]
+            # a gap through the stop fills at the (worse) open
+            fill = min(t.stop, open_) if t.long else max(t.stop, open_)
+            return [self._exit(t, "stop_hit", ts, fill)]
 
         events = []
         if not t.partial_done and self._touches(t, t.target_2r, high, low, favorable=True):

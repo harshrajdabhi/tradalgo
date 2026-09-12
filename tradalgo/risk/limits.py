@@ -4,6 +4,8 @@ from pathlib import Path
 
 from tradalgo.strategies.base import Signal
 
+EPS = 1e-9  # float sums like -1.2 + -0.8 must still trip the -2R limit
+
 
 @dataclass(frozen=True)
 class DailyRiskState:
@@ -22,7 +24,9 @@ def check_limits(state: DailyRiskState, signal: Signal, max_trades_per_day: int,
     strategy on the same symbol. If an earlier trade closed at <= -1R, the next one must also use a
     different strategy than the losing one.
     """
-    if state.realized_r <= -daily_loss_limit_r:
+    if signal.ts.date() != state.trade_date:
+        return f"stale risk state: state date {state.trade_date} != signal date {signal.ts.date()}"
+    if state.realized_r <= -daily_loss_limit_r + EPS:
         return f"daily loss limit reached ({state.realized_r:.2f}R <= -{daily_loss_limit_r}R)"
     if state.trades_taken >= max_trades_per_day:
         return f"max trades per day reached ({state.trades_taken}/{max_trades_per_day})"
@@ -30,7 +34,7 @@ def check_limits(state: DailyRiskState, signal: Signal, max_trades_per_day: int,
     if signal.symbol in traded:
         return f"not independent: same symbol {signal.symbol} already traded today"
     for sym, strategy, closed, net_r in state.taken:
-        if closed and net_r is not None and net_r <= -1.0 and strategy == signal.strategy:
+        if closed and net_r is not None and net_r <= -1.0 + EPS and strategy == signal.strategy:
             return f"after a -1R loss on {sym}/{strategy}, second trade needs a different strategy"
     return None
 

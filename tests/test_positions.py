@@ -151,3 +151,57 @@ def test_round_trip_preserves_behaviour():
     assert drive(b, first) == []
     assert drive(a, rest) == drive(b, rest)
     assert a.to_dict() == b.to_dict()
+
+
+def test_late_closed_bar_after_ticks_is_processed():
+    pm = PositionManager()
+    pm.open(1, plan())
+    assert pm.on_price(at(10, 6), 99.0, 99.0, 99.0, False) == []
+    assert pm.on_price(at(10, 8), 98.5, 98.5, 98.5, False) == []
+    bar = (at(10, 10), 99.5, 97.8, 98.6, True)                    # 10:05-10:10 bar stamped at close
+    ev = pm.on_price(*bar)
+    assert kinds(ev) == ["stop_hit"] and ev[0].price == 98.0
+    assert pm.on_price(*bar) == []
+
+
+def test_bar_at_same_ts_as_tick_is_processed_but_older_tick_ignored():
+    pm = PositionManager(trail_bars=1)
+    pm.open(1, plan())
+    pm.on_price(at(10, 9), 104.0, 104.0, 104.0, False)             # partial, stop -> 100
+    assert pm.on_price(at(10, 10), 104.1, 104.1, 104.1, False) == []
+    ev = pm.on_price(at(10, 10), 104.5, 101.0, 104.0, True)         # bar at equal ts still trails
+    assert [e.new_stop for e in ev if e.kind == "trail_update"] == [101.0]
+    assert pm.on_price(at(10, 9), 90.0, 90.0, 90.0, False) == []
+
+
+def test_gap_through_stop_fills_at_open():
+    pm = PositionManager()
+    pm.open(1, plan())
+    ev = pm.on_price(at(10, 10), 97.0, 95.0, 96.0, True, open=96.5)
+    assert kinds(ev) == ["stop_hit"] and ev[0].price == 96.5 and ev[0].r_multiple == pytest.approx(-1.75)
+
+
+def test_gap_through_short_stop_and_tick_fill():
+    pm = PositionManager()
+    pm.open(1, plan("short", 200.0, 204.0))
+    ev = pm.on_price(at(10, 6), 206.0, 206.0, 206.0, False)
+    assert ev[0].price == 206.0 and ev[0].r_multiple == pytest.approx(-1.5)
+
+
+def test_hard_exit_on_bar_closing_at_1500():
+    pm = PositionManager()
+    pm.open(1, plan())
+    ev = pm.on_price(at(14, 55), 101.0, 99.0, 100.0, True)
+    assert ev == []
+    ev = pm.on_price(at(15, 0), 101.0, 99.0, 100.5, True)          # 14:55-15:00 bar stamped at close
+    assert kinds(ev) == ["hard_exit"] and ev[0].qty == 10
+    assert pm.on_price(at(15, 0), 101.0, 99.0, 100.5, True) == []
+    assert pm.on_price(at(15, 1), 100.0, 100.0, 100.0, False) == []
+
+
+def test_partial_and_3r_same_bar():
+    pm = PositionManager()
+    pm.open(1, plan())
+    ev = pm.on_price(at(10, 10), 106.5, 99.0, 106.0, True)
+    assert kinds(ev) == ["partial_exit", "trail_update", "runner_exit"]
+    assert (ev[2].qty, ev[2].r_multiple) == (4, 3.0)

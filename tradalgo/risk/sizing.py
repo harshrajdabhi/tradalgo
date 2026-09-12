@@ -2,7 +2,7 @@ import math
 
 
 def effective_leverage(symbol_leverage: float | None, max_leverage: float, fallback_leverage: float) -> float:
-    return float(min(symbol_leverage or fallback_leverage, max_leverage))
+    return float(min(fallback_leverage if symbol_leverage is None or symbol_leverage <= 0 else symbol_leverage, max_leverage))
 
 
 def position_qty(entry: float, stop_loss: float, capital: float, max_risk_pct: float, leverage: float) -> int:
