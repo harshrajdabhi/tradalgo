@@ -17,6 +17,9 @@ dependencies = [
     "requests>=2.31",
     "fyers-apiv3>=3.1",
     "yfinance>=0.2.40",
+    "APScheduler>=3.10,<4",
+    "streamlit>=1.37",
+    "plotly>=5.20",
 ]
 
 [project.optional-dependencies]
