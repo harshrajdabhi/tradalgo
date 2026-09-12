@@ -35,8 +35,12 @@ def _reasons(row: pd.Series) -> list[str]:
         reasons.append(f"ATR% {_ordinal(round(row['atr_pct_pctile']))} pct")
     if _is_num(row.get("rvol")):
         reasons.append(f"RVOL {row['rvol']:.1f}x")
+    trigger = row.get("trigger_name")
+    beyond = f" beyond {trigger} trigger" if isinstance(trigger, str) else ""
     if _is_num(row.get("room_atr")):
-        reasons.append(f"{row['room_atr']:.1f} ATR room to {row['level_name']}")
+        reasons.append(f"{row['room_atr']:.1f} ATR room to {row['level_name']}{beyond}")
+    elif beyond:
+        reasons.append(f"trigger at {trigger}, no key level beyond")
     else:
         reasons.append("no key level in the way")
     return reasons
@@ -56,7 +60,9 @@ def rank_candidates(factors: pd.DataFrame, weights: dict[str, float], liquid: se
         elif symbol in blackout:
             item.rejected = "corporate event today/next trading day"
         elif _is_num(room) and room < min_room_r * stop_atr_frac:
-            item.rejected = (f"2R blocked: {row['level_name']} only {room:.2f} ATR away, "
+            trigger = row.get("trigger_name")
+            origin = f"{trigger} trigger" if isinstance(trigger, str) else "close"
+            item.rejected = (f"2R blocked: {row['level_name']} only {room:.2f} ATR beyond {origin}, "
                              f"needs {min_room_r * stop_atr_frac:.2f} ATR ({min_room_r:g}R x {stop_atr_frac:g} ATR stop)")
         (rejected if item.rejected else valid).append(item)
     valid.sort(key=lambda s: s.composite_score, reverse=True)

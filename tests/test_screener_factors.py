@@ -57,10 +57,75 @@ def test_sector_relative_strength_uses_industry_peers():
     assert np.isfinite(peers_mean)
 
 
-def test_news_scores_passed_through():
+def test_news_scores_bias_adjusted():
     universe, daily, index = universe_and_data()
-    df = compute_factors(daily, index, universe, TRADE_DATE, news_scores={"S1": 90.0})
-    assert df.loc["S1", "news_sentiment"] == 90.0
+    df = compute_factors(daily, index, universe, TRADE_DATE, news_scores={"S1": 90.0, "S7": 90.0})
+    assert df.loc["S7", "direction"] == "long" and df.loc["S7", "news_sentiment"] == 90.0
+    assert df.loc["S1", "direction"] == "short" and df.loc["S1", "news_sentiment"] == pytest.approx(10.0)
+
+
+def test_long_bias_stock_lagging_its_sector_scores_low_on_rs():
+    universe = [Constituent(f"S{i}", f"Company {i}", "Banks" if i < 4 else "IT", "nifty50") for i in range(8)]
+    drifts = [0.002, 0.01, 0.01, 0.01, 0.002, 0.002, 0.002, 0.002]
+    daily = {c.symbol: make_daily(drifts[i], seed=i) for i, c in enumerate(universe)}
+    df = compute_factors(daily, make_daily(0.0, seed=99), universe, TRADE_DATE)
+    assert df.loc["S0", "direction"] == "long"
+    assert df.loc["S0", "rs_sector"] < 0
+    assert df.loc["S0", "relative_strength"] < 50
+    assert df.loc["S0", "relative_strength"] < df.loc["S1", "relative_strength"]
+
+
+def level_fixture(last_close: float, swing_high: float, n: int = 80) -> pd.DataFrame:
+    """Flat 99..101 range (ATR ~2), one confirmed swing high at bar 40, last close below PDH=101."""
+    idx = pd.bdate_range(end="2026-09-10", periods=n, tz=TZ, name="ts")
+    close = np.full(n, 100.0)
+    high = np.full(n, 101.0)
+    low = np.full(n, 99.0)
+    high[40] = swing_high
+    close[-1] = last_close
+    return pd.DataFrame({"open": close, "high": high, "low": low, "close": close, "volume": 1e6}, index=idx)
+
+
+def _one(df):
+    universe = [Constituent("X", "X Ltd", "IT", "nifty50")]
+    return compute_factors({"X": df}, level_fixture(100.0, 101.0), universe, TRADE_DATE).loc["X"]
+
+
+def test_level_at_pdh_is_trigger_and_room_measured_to_swing_beyond():
+    row = _one(level_fixture(100.6, swing_high=106.0))
+    assert row["direction"] == "long"
+    assert row["trigger_name"] == "PDH" and row["trigger_level"] == 101.0
+    assert row["nearest_level"] == 106.0
+    assert row["room_atr"] == pytest.approx(5.0 / row["atr14"])
+    assert row["room_atr"] > 2.0
+
+
+def _rank_one(df):
+    from tradalgo.screener.rank import rank_candidates
+    universe = [Constituent("X", "X Ltd", "IT", "nifty50")]
+    factors = compute_factors({"X": df}, level_fixture(100.0, 101.0), universe, TRADE_DATE)
+    return rank_candidates(factors, {k: 1 / 7 for k in FACTOR_KEYS}, {"X"}, set(), 5)[0]
+
+
+def test_trending_stock_under_pdh_with_swing_far_above_is_accepted():
+    pick = _rank_one(level_fixture(100.6, swing_high=106.0))
+    assert pick.rejected is None
+    assert any("beyond PDH trigger" in r for r in pick.reasons)
+
+
+def test_swing_just_beyond_pdh_trigger_blocks():
+    row = _one(level_fixture(100.6, swing_high=101.8))
+    assert row["trigger_name"] == "PDH"
+    assert row["room_atr"] == pytest.approx(0.8 / row["atr14"])
+    assert 0.35 < row["room_atr"] < 0.45
+    assert "2R blocked" in _rank_one(level_fixture(100.6, swing_high=101.8)).rejected
+
+
+def test_level_outside_trigger_zone_but_inside_required_room_rejects():
+    # PDH 101 is 1.0 away (~0.5 ATR): beyond the 0.25 ATR trigger zone, short of the 0.6 ATR needed
+    row = _one(level_fixture(100.0, swing_high=106.0))
+    assert row["trigger_level"] is None and row["level_name"] == "PDH"
+    assert "2R blocked" in _rank_one(level_fixture(100.0, swing_high=106.0)).rejected
 
 
 def test_no_lookahead_future_rows_do_not_change_scores():

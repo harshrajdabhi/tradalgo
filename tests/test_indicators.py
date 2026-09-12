@@ -53,6 +53,43 @@ def test_rsi_extremes_and_by_hand():
     assert r.iloc[3] == pytest.approx(100 - 100 / (1 + 1.25 / 0.25))
 
 
+def test_rsi_flat_series_is_neutral():
+    assert ind.rsi(pd.Series([5.0] * 10), 3).iloc[-1] == pytest.approx(50.0)
+
+
+def test_rolling_percentile_nan_when_current_nan():
+    s = pd.Series([1.0, 2, 3, np.nan])
+    assert np.isnan(ind.rolling_percentile(s, 4, min_periods=2).iloc[-1])
+
+
+def test_adx_exact_values_by_hand():
+    df = daily([9, 11, 12, 11, 14], highs=[10, 12, 13, 12, 15], lows=[8, 9, 11, 10, 12])
+    # +DM: [-,2,1,0,3]  -DM: [-,0,0,1,0]  TR: [-,3,2,2,4]; Wilder(2) seeded with mean of bars 1..2
+    s_tr, s_p, s_m = 2.5, 1.5, 0.0
+    di = [(100 * s_p / s_tr, 100 * s_m / s_tr)]
+    for tr, p, m in [(2, 0, 1), (4, 3, 0)]:
+        s_tr, s_p, s_m = (s_tr + tr) / 2, (s_p + p) / 2, (s_m + m) / 2
+        di.append((100 * s_p / s_tr, 100 * s_m / s_tr))
+    dx = [100 * abs(p - m) / (p + m) for p, m in di]  # [100, 20, 76.47]
+    adx2 = (dx[0] + dx[1]) / 2
+    adx3 = (adx2 + dx[2]) / 2
+    out = ind.adx(df, 2)
+    assert out["plus_di"].iloc[2:].tolist() == pytest.approx([d[0] for d in di])
+    assert out["minus_di"].iloc[2:].tolist() == pytest.approx([d[1] for d in di])
+    assert np.isnan(out["adx"].iloc[2])
+    assert out["adx"].iloc[3] == pytest.approx(60.0) == pytest.approx(adx2)
+    assert out["adx"].iloc[4] == pytest.approx(adx3)
+    assert adx3 == pytest.approx((60 + 100 * 52 / 68) / 2)
+
+
+def test_session_vwap_exact_with_asymmetric_bars():
+    idx = pd.DatetimeIndex(["2026-09-11 09:15", "2026-09-11 09:20", "2026-09-11 09:25"], tz=TZ)
+    df = frame([[0, 12, 9, 11.4, 100], [0, 11, 10, 10.1, 300], [0, 13, 10, 12.5, 600]], idx)
+    tp = [(12 + 9 + 11.4) / 3, (11 + 10 + 10.1) / 3, (13 + 10 + 12.5) / 3]
+    expected = [tp[0], (tp[0] * 100 + tp[1] * 300) / 400, (tp[0] * 100 + tp[1] * 300 + tp[2] * 600) / 1000]
+    assert ind.session_vwap(df).tolist() == pytest.approx(expected)
+
+
 def test_adx_strong_uptrend():
     closes = list(np.arange(100.0, 160.0))
     out = ind.adx(daily(closes), 14)

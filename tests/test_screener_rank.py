@@ -69,10 +69,6 @@ def test_run_screen_persists_idempotently(settings, engine):
     universe, daily, index = universe_and_data()
     for df in daily.values():
         df["volume"] = 5e6
-        # close at the bar's extreme so the prior-day level is not an immediate blocker
-        last = df.index[-1]
-        extreme = "high" if df["close"].iloc[-1] > df["close"].iloc[-21] else "low"
-        df.loc[last, extreme] = df.loc[last, "close"]
     now = datetime(2026, 9, 11, 7, 0, tzinfo=IST)
     for _ in range(2):
         picks = run_screen(settings, engine, daily, index, universe, TRADE_DATE, now,
@@ -91,6 +87,22 @@ def test_run_screen_persists_idempotently(settings, engine):
     assert rows[0]["reasons"]
     assert len(jobs) == 2 and all(j["job"] == "screen" and j["status"] == "succeeded" for j in jobs)
     assert any("event calendar" in w["message"] for w in warnings)
+
+
+def test_run_screen_warns_when_fewer_picks_than_shortlist_size(settings, engine):
+    universe, daily, index = universe_and_data()
+    for df in daily.values():
+        df["volume"] = 5e6
+    now = datetime(2026, 9, 11, 7, 0, tzinfo=IST)
+    picks = run_screen(settings, engine, daily, index, universe, TRADE_DATE, now,
+                       fetch_events=lambda d, n: ({"S1", "S2", "S3", "S4"}, None), fetch_news=fake_news)
+    assert len(picks) < settings.screener.shortlist_size
+    with engine.connect() as conn:
+        messages = [r.message for r in conn.execute(select(health_events))]
+    short = [m for m in messages if "only" in m]
+    assert len(short) == 1
+    assert f"only {len(picks)} of {settings.screener.shortlist_size}" in short[0]
+    assert "corporate event" in short[0]
 
 
 def test_run_screen_records_failed_job(settings, engine):

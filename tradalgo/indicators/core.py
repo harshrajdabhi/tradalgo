@@ -45,7 +45,8 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = _wilder((-diff).clip(lower=0), period)
     with np.errstate(divide="ignore", invalid="ignore"):
         out = 100 - 100 / (1 + avg_gain / avg_loss)
-    return out.where(avg_loss != 0, 100.0).where(avg_gain.notna())
+    out = out.where(avg_loss != 0, 100.0).where((avg_loss != 0) | (avg_gain != 0), 50.0)
+    return out.where(avg_gain.notna())
 
 
 def adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
@@ -88,7 +89,7 @@ def daily_relative_volume(daily: pd.DataFrame, lookback: int = 20) -> float:
 def rolling_percentile(series: pd.Series, window: int, min_periods: int = 20) -> pd.Series:
     """Percent (0..100) of values in the trailing window that are <= the current value."""
     return series.rolling(window, min_periods=min_periods).apply(
-        lambda w: (w[~np.isnan(w)] <= w[-1]).mean() * 100, raw=True)
+        lambda w: np.nan if np.isnan(w[-1]) else (w[~np.isnan(w)] <= w[-1]).mean() * 100, raw=True)
 
 
 def realized_vol_percentile(daily: pd.DataFrame, window: int = 20, lookback: int = 250) -> pd.Series:

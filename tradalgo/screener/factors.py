@@ -1,10 +1,13 @@
 """The spec's 7 ranking factors, from completed daily candles strictly before trade_date.
 
-Every factor is direction-neutral (strong weakness scores as high as strong strength) because shortlisted
-names are traded in their bias direction. Raw components are cross-sectionally percentile-ranked (0..100)
-and averaged. Structure formula: close beyond the prior 20-day high (long) / low (short) = breakout = 100;
-otherwise tightness (100 - own Bollinger-width percentile) x extremity (|2*pos-1|, pos = close position in
-the 20-day range, so 1 near highs/lows); NR7 adds 10. news_sentiment is passed through as already 0..100.
+Factors score quality in the bias direction (strong weakness scores as high as strong strength for a short).
+momentum/volatility/volume/structure use magnitudes; relative_strength ranks RS signed by bias; news is
+bias-adjusted (short = 100 - sentiment) and passed through. Raw components are cross-sectionally
+percentile-ranked (0..100) and averaged. Structure formula: close beyond the prior 20-day high (long) / low
+(short) = breakout = 100; otherwise tightness (100 - own Bollinger-width percentile) x extremity (|2*pos-1|,
+pos = close position in the 20-day range, so 1 near highs/lows); NR7 adds 10.
+Room: the first key level on the bias side within trigger_zone_atr x ATR14 of the close is the trigger; room_atr
+is measured from the trigger (or the close if none) to the next level beyond it.
 """
 from datetime import date
 
@@ -42,7 +45,7 @@ def _level_name(level: float, pdh_l, pw_hl, tol: float) -> str:
     return "swing level"
 
 
-def _raw(d: pd.DataFrame, trade_date: date, index_ret20: float) -> dict:
+def _raw(d: pd.DataFrame, trade_date: date, index_ret20: float, trigger_zone_atr: float) -> dict:
     close = d["close"]
     last = float(close.iloc[-1])
     ema20 = ind.ema(close, 20)
@@ -61,10 +64,19 @@ def _raw(d: pd.DataFrame, trade_date: date, index_ret20: float) -> dict:
 
     tol = 0.002
     levels = ind.key_levels(d, trade_date, tolerance_pct=tol)
-    level = ind.nearest_level_above(last, levels) if direction == "long" else ind.nearest_level_below(last, levels)
-    room_atr = abs(level - last) / atr14 if level is not None and atr14 > 0 else float("nan")
+    side = sorted((l for l in levels if l > last)) if direction == "long" else \
+        sorted((l for l in levels if l < last), reverse=True)
+    trigger = None
+    # A level hugging the close on the bias side is the entry trigger (e.g. PDH breakout), not the blocker.
+    if side and atr14 > 0 and abs(side[0] - last) <= trigger_zone_atr * atr14:
+        trigger = side.pop(0)
+    level = side[0] if side else None
+    ref = trigger if trigger is not None else last
+    room_atr = abs(level - ref) / atr14 if level is not None and atr14 > 0 else float("nan")
+    pdh_l, pw_hl = ind.prev_day_hlc(d, trade_date), ind.prev_week_hl(d, trade_date)
 
     volume = d["volume"]
+    vol20 = volume.iloc[-20:].mean()
     return {
         "direction": direction, "close": last, "ret20": ret20, "rs_nifty": rs_nifty,
         "ema_slope": float(ema20.iloc[-1] / ema20.iloc[-6] - 1),
@@ -73,18 +85,19 @@ def _raw(d: pd.DataFrame, trade_date: date, index_ret20: float) -> dict:
         "atr_pct_pctile": float(ind.atr_pct_percentile(d).iloc[-1]),
         "rv_pctile": float(ind.realized_vol_percentile(d).iloc[-1]),
         "rvol": ind.daily_relative_volume(d, 20),
-        "vol_expansion": float(volume.iloc[-5:].mean() / volume.iloc[-20:].mean()),
+        "vol_expansion": float(volume.iloc[-5:].mean() / vol20) if vol20 > 0 else float("nan"),
         "structure_raw": structure,
         "nearest_level": level,
-        "level_name": _level_name(level, ind.prev_day_hlc(d, trade_date), ind.prev_week_hl(d, trade_date), tol)
-        if level is not None else None,
+        "level_name": _level_name(level, pdh_l, pw_hl, tol) if level is not None else None,
+        "trigger_level": trigger,
+        "trigger_name": _level_name(trigger, pdh_l, pw_hl, tol) if trigger is not None else None,
         "room_atr": room_atr,
     }
 
 
 def compute_factors(daily_by_symbol: dict[str, pd.DataFrame], index_daily: pd.DataFrame,
                     universe: list[Constituent], trade_date: date,
-                    news_scores: dict[str, float] | None = None) -> pd.DataFrame:
+                    news_scores: dict[str, float] | None = None, trigger_zone_atr: float = 0.25) -> pd.DataFrame:
     """One row per symbol with enough history: the 7 factor scores (0..100) plus raw fields used for reasons."""
     news_scores = news_scores or {}
     index_prior = index_daily[index_daily.index.date < trade_date]
@@ -98,7 +111,7 @@ def compute_factors(daily_by_symbol: dict[str, pd.DataFrame], index_daily: pd.Da
             continue
         d = df[df.index.date < trade_date]
         if len(d) >= MIN_HISTORY:
-            raw[c.symbol] = _raw(d, trade_date, index_ret20)
+            raw[c.symbol] = _raw(d, trade_date, index_ret20, trigger_zone_atr)
     out = pd.DataFrame.from_dict(raw, orient="index")
     if out.empty:
         return pd.DataFrame(columns=list(FACTOR_KEYS))
@@ -110,10 +123,12 @@ def compute_factors(daily_by_symbol: dict[str, pd.DataFrame], index_daily: pd.Da
     out["rs_sector"] = (out["ret20"] - peer_mean).where(counts > 1, 0.0)
 
     out["momentum_trend"] = (_xrank(out["ret20"].abs()) + _xrank(out["ema_slope"].abs()) + _xrank(out["adx14"])) / 3
-    out["relative_strength"] = (_xrank(out["rs_nifty"].abs()) + _xrank(out["rs_sector"].abs())) / 2
+    sign = out["direction"].map({"long": 1.0, "short": -1.0})
+    out["relative_strength"] = (_xrank(sign * out["rs_nifty"]) + _xrank(sign * out["rs_sector"])) / 2
     out["volatility"] = (_xrank(out["atr_pct"]) + _xrank(out["atr_pct_pctile"]) + _xrank(out["rv_pctile"])) / 3
     out["relative_volume"] = (_xrank(out["rvol"]) + _xrank(out["vol_expansion"])) / 2
     out["structure"] = _xrank(out["structure_raw"])
     out["level_proximity"] = _xrank(out["room_atr"].astype(float).fillna(ROOM_CAP_ATR).clip(upper=ROOM_CAP_ATR))
-    out["news_sentiment"] = [float(news_scores.get(s, 50.0)) for s in out.index]
+    news = pd.Series({s: float(news_scores.get(s, 50.0)) for s in out.index})
+    out["news_sentiment"] = news.where(out["direction"] == "long", 100.0 - news)
     return out
