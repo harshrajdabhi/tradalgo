@@ -80,7 +80,12 @@ class PathsConfig(BaseModel):
         return self.data_dir / "tradalgo.db"
 
 
+class FyersConfig(BaseModel):
+    redirect_uri: str
+
+
 class Settings(BaseModel):
+    fyers: FyersConfig
     capital: CapitalConfig
     screener: ScreenerConfig
     market: MarketConfig
@@ -109,3 +114,11 @@ def get_secret(name: str) -> str:
     if value is None:
         raise KeyError(f"secret {name!r} not found in keychain service {KEYRING_SERVICE!r}")
     return value
+
+
+class KeyringStore:
+    def get(self, name: str) -> str | None:
+        return keyring.get_password(KEYRING_SERVICE, name)
+
+    def set(self, name: str, value: str) -> None:
+        keyring.set_password(KEYRING_SERVICE, name, value)

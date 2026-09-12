@@ -12,6 +12,11 @@ dependencies = [
     "PyYAML>=6.0",
     "SQLAlchemy>=2.0",
     "keyring>=24",
+    "pandas>=2.1",
+    "pyarrow>=15",
+    "requests>=2.31",
+    "fyers-apiv3>=3.1",
+    "yfinance>=0.2.40",
 ]
 
 [project.optional-dependencies]
