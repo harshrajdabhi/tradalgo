@@ -33,6 +33,11 @@ Required names:
 
 The FYERS app's redirect URI must match `fyers.redirect_uri` in `config.yaml`.
 
+**Create the FYERS API app as "Non-trading"** (or, if using a "Trading" app, never grant it "Order
+placements"). This app only ever reads history/quotes — a credential that has no order-placement
+permission at all is a second line of defense, on top of the code-level guard, in case of a bug or a
+mistaken manual call.
+
 ## FYERS login
 
 `fyers.login_with_auth_code` uses a browser once to get a refresh token valid for ~15 days:
@@ -109,6 +114,38 @@ This prints the `launchctl bootstrap gui/$(id -u) <plist>` command for each job 
 ```bash
 sudo pmset repeat wakeorpoweron MTWRF 06:55:00
 ```
+
+## Paper-testing on GitHub Actions (no Mac required)
+
+Two workflows in `.github/workflows/` run the morning screener and the intraday cycle on GitHub's own
+runners, so you don't need to keep a Mac awake for the paper-testing period. They never place orders —
+same guard, same code path as the local `session`/`worker`.
+
+1. **Add repo secrets** (Settings → Secrets and variables → Actions): `FYERS_APP_ID`, `FYERS_SECRET_KEY`,
+   `FYERS_PIN`, `FYERS_REFRESH_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. Get the refresh token by
+   running `tradalgo login` once yourself locally (`.venv/bin/tradalgo login`, then read it back with
+   `python -c "import keyring; print(keyring.get_password('tradalgo','FYERS_REFRESH_TOKEN'))"`) — the
+   redirect URL stays the local one already in `config.yaml` (e.g. `https://127.0.0.1:5000/`); the login
+   itself is always a manual, human-in-the-browser step, done once every ~15 days, never on a GitHub
+   runner. Re-run it and update the secret when the refresh token expires (`tradalgo report`/Telegram
+   will remind you).
+2. **Push this branch.** `morning-screen.yml` runs at 07:00 IST on trading weekdays; `intraday-monitor.yml`
+   runs roughly every 5 minutes from 09:15–15:31 IST. Both accept `workflow_dispatch` so you can trigger
+   them by hand from the Actions tab to test.
+3. **State persists across runs** on an orphan `runtime-state` branch (created automatically on first run)
+   holding `data/tradalgo.db` and the session JSON — each 5-minute run is a fresh container, so this is how
+   `tradalgo ci-cycle` (a single 5-minute cycle, then exit — see `tradalgo/cli.py`) picks up where the
+   previous run left off. The candle cache and logs are *not* persisted there (too large / regenerable);
+   each screen run rebuilds what it needs from FYERS/yfinance, and logs go to the workflow's uploaded
+   artifacts instead.
+4. **GitHub's cron has no delivery guarantee** — a run can fire a few minutes late, especially at busy
+   times, and a missed run's bars are only replayed on the *next* run's frame (this is exactly the
+   sleeping-Mac scenario the local design already has to tolerate). Do not treat a 5-minute cadence on
+   GitHub Actions as more reliable than it is; the plan's Verification-step shadow run applies here too.
+5. **This is for the plan's paper-testing and 5–6 month backtest-validation period only.** The app never
+   places orders regardless of where it runs, so there is no "live" flag to flip — the way you eventually
+   trust an alert enough to act on it manually is the M6 gate (`tradalgo backtest ...`) plus a clean shadow
+   run, not a switch from paper to Actions or Actions to local.
 
 ## Before relying on live alerts
 

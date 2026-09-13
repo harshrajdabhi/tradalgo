@@ -1,0 +1,18 @@
+name: Save tradalgo state
+description: Copies data/tradalgo.db and data/session/ back into the runtime-state branch and pushes it.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -e
+        mkdir -p .state-branch/data
+        rsync -a --delete --exclude 'candles/' --exclude 'logs/' data/ .state-branch/data/
+        cd .state-branch
+        git config user.name "tradalgo-bot"
+        git config user.email "tradalgo-bot@users.noreply.github.com"
+        git add -A
+        if ! git diff --cached --quiet; then
+          git commit -q -m "state: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push -q origin HEAD:runtime-state
+        fi

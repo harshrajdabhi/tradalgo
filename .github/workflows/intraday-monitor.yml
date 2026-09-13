@@ -1,0 +1,46 @@
+name: Intraday monitor (every 5 min, market hours IST)
+
+on:
+  schedule:
+    # 09:15-15:30 IST = 03:45-10:00 UTC. GitHub's cron has no delivery guarantee and can run a few
+    # minutes late, especially at busy times — cmd_ci_cycle checks the real market-hours window itself
+    # and no-ops outside it, so a late or slightly-early trigger is harmless.
+    - cron: "*/5 3-9 * * 1-5"
+    - cron: "1 10 * * 1-5"    # ~15:31 IST: end-of-day summary + final management pass
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: intraday-monitor
+  cancel-in-progress: false   # never skip/cancel a cycle for a trade that might be open
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4        # a stuck run must not block the next 5-minute cycle
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e '.[dev]'
+      - uses: ./.github/actions/restore-state
+      - run: tradalgo ci-cycle
+        env:
+          FYERS_APP_ID: ${{ secrets.FYERS_APP_ID }}
+          FYERS_SECRET_KEY: ${{ secrets.FYERS_SECRET_KEY }}
+          FYERS_PIN: ${{ secrets.FYERS_PIN }}
+          FYERS_REFRESH_TOKEN: ${{ secrets.FYERS_REFRESH_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - uses: ./.github/actions/save-state
+        if: always()
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cycle-logs-${{ github.run_id }}
+          path: data/logs/**
+          retention-days: 30

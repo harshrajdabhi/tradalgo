@@ -1,0 +1,21 @@
+name: Restore tradalgo state
+description: >
+  Checks out the persistent data/ directory (SQLite DB, session JSON, Telegram offset) from the
+  runtime-state branch into ./data, creating that branch on first run. Candle cache and logs are not
+  persisted here (too large / not needed across runs) — run `tradalgo backfill` to (re)build the cache.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -e
+        git fetch origin runtime-state:refs/remotes/origin/runtime-state 2>/dev/null || true
+        if git show-ref --verify --quiet refs/remotes/origin/runtime-state; then
+          git worktree add --quiet .state-branch origin/runtime-state
+        else
+          git worktree add --quiet --detach .state-branch
+          git -C .state-branch checkout --orphan runtime-state
+          git -C .state-branch rm -rf --quiet . 2>/dev/null || true
+        fi
+        mkdir -p data
+        if [ -d .state-branch/data ]; then cp -R .state-branch/data/. data/; fi
