@@ -46,7 +46,10 @@ def _update_run(engine: Engine, run_id: int, **values) -> None:
 
 def process_run(settings: Settings, engine: Engine, clock: Clock, run_id: int, *, runner=run_backtest,
                 cache=None, universe=None) -> str:
-    """Run one claimed backtest to a terminal status; never raises. Returns the final status."""
+    """Run one claimed backtest to a terminal status; never raises. Returns the final status.
+
+    Cancel is checked between days, so a cancel requested during the final day still ends as 'done'.
+    """
     def progress(pct: float) -> None:
         _update_run(engine, run_id, progress_pct=float(pct))
 

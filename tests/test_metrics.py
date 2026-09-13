@@ -5,7 +5,7 @@ import pytest
 from tradalgo.backtest.metrics import compute_metrics
 
 KEYS = {"trades", "win_rate", "expectancy_r", "expectancy_r_no_slippage", "profit_factor", "max_drawdown_r",
-        "net_r", "net_rupees", "by_strategy", "by_regime"}
+        "net_r", "net_rupees", "by_strategy", "by_regime", "missed_entries", "fill_rate", "missed"}
 
 
 def _t(net_r, no_slip, rupees, strategy, regime):
@@ -44,4 +44,5 @@ def test_zero_trades_is_valid_json():
     m = compute_metrics([])
     assert set(m) == KEYS
     assert m["trades"] == 0 and m["expectancy_r"] == 0.0 and m["by_strategy"] == {}
+    assert m["fill_rate"] is None and m["missed_entries"] == 0 and m["missed"] == []
     json.loads(json.dumps(m, allow_nan=False))

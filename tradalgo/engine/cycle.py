@@ -21,6 +21,7 @@ from tradalgo.strategies.base import MarketContext, Regime, Signal
 BAR = pd.Timedelta(minutes=5)
 BAR_15 = pd.Timedelta(minutes=15)
 HISTORY_SESSIONS = 5
+REGIME_HISTORY_SESSIONS = 20
 AGG = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
 
 
@@ -98,6 +99,7 @@ class CycleDeps:
     levels: Callable = session_levels        # (daily, candles_5m, now) -> list[float]
     leverage: Callable[[str], float | None] = lambda symbol: None
     history_sessions: int = HISTORY_SESSIONS
+    regime_history_sessions: int = REGIME_HISTORY_SESSIONS
 
 
 @dataclass
@@ -212,11 +214,14 @@ def run_cycle(state: SessionState, now: datetime, frames_by_symbol: dict[str, Sy
     if check_kill_switch and kill_switch_active(s.paths.data_dir):
         return
 
-    i5, i15 = closed_session_frames(index_5m, now, deps.history_sessions)
-    market_regime = deps.classify(i15, i5)
+    # the classifier's time-of-day volatility baseline needs ~20 sessions; detectors keep exactly history_sessions
+    _, i15 = closed_session_frames(index_5m, now, deps.history_sessions)
+    ri5, ri15 = closed_session_frames(index_5m, now, deps.regime_history_sessions)
+    market_regime = deps.classify(ri15, ri5)
     for symbol in sorted(views):
         c5, c15, daily = views[symbol]
-        ctx = _context(symbol, now, c5, c15, daily, i15, deps.classify(c15, c5), market_regime)
+        r5, r15 = closed_session_frames(frames_by_symbol[symbol].candles_5m, now, deps.regime_history_sessions)
+        ctx = _context(symbol, now, c5, c15, daily, i15, deps.classify(r15, r5), market_regime)
         for signal in deps.detect_all(ctx, s, deps.calendar):
             key = (signal.symbol, signal.strategy, signal.ts.isoformat())
             if key in state.seen_signals:

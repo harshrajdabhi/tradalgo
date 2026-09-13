@@ -158,3 +158,28 @@ def test_build_context_identical_for_5_or_50_prior_sessions():
     assert a.candles_5m.index[0] == pd.Timestamp(at(9, 15, days[-6]))
     assert a.candles_15m.index[-1] == pd.Timestamp(at(9, 45))
     assert a.daily.index[-1].date() < TODAY
+
+
+def test_classifier_gets_20_sessions_detectors_get_5(deps_for):
+    days = trading_weekdays(61, TODAY)
+    seen = {}
+    for n in (20, 60):
+        five = pd.concat([rising_day(d, 100 + i) for i, d in enumerate(days)][-(n + 1):])
+        classified, detected = [], []
+
+        def classify(c15, c5=None, **kw):
+            classified.append((c15, c5))
+            return fake_classify(c15)
+
+        deps = deps_for(lambda ctx, s, c: detected.append(ctx) or [])
+        deps.classify = classify
+        run_cycle(state(), at(10, 2), {"AAA": SymbolFrames(five, EMPTY)}, five, deps, Sink(), check_kill_switch=False)
+        seen[n] = (classified, detected)
+    for n in (20, 60):
+        classified, (ctx,) = seen[n]
+        assert all(len(set(c5.index.date)) == 21 and len(set(c15.index.date)) == 21 for c15, c5 in classified)
+        assert len(set(ctx.candles_5m.index.date)) == 6 and len(set(ctx.index_15m.index.date)) == 6
+    for (a15, a5), (b15, b5) in zip(seen[20][0], seen[60][0]):
+        pd.testing.assert_frame_equal(a15, b15)
+        pd.testing.assert_frame_equal(a5, b5)
+    pd.testing.assert_frame_equal(seen[20][1][0].candles_5m, seen[60][1][0].candles_5m)

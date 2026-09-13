@@ -48,8 +48,9 @@ def _run(settings, engine, cache, params, **kw):
 def test_three_day_smoke(settings, engine, tmp_path):
     cache = build_replay_cache(tmp_path / "candles")
     run_id, progress, metrics = _run(settings, engine, cache, replay_params(REPLAY_DAYS[0], REPLAY_DAYS[-1]))
-    assert set(metrics) == CONTRACT_KEYS
+    assert set(metrics) >= CONTRACT_KEYS
     assert metrics["trades"] == 3 and metrics["win_rate"] == 1.0
+    assert metrics["missed_entries"] == 0 and metrics["fill_rate"] == 1.0
     assert set(metrics["by_strategy"]) == {"orb"} and set(metrics["by_regime"]) == {"trend_up"}
     assert progress == [33.3, 66.7, 100.0]
     with engine.connect() as conn:
@@ -90,3 +91,27 @@ def test_params_override_without_mutating_settings(settings):
     assert [n for n, c in s.strategies.items() if c.enabled] == ["orb"]
     assert settings.capital.max_risk_pct == 0.03 and all(c.enabled for c in settings.strategies.values())
     assert set(REPLAY_SYMBOLS) >= {"AAA"}
+
+
+def test_missed_entry_reported_in_metrics(settings, engine, tmp_path):
+    cache = build_replay_cache(tmp_path / "candles")
+
+    def detect(ctx, settings_, calendar):
+        last = ctx.candles_5m.index[-1]
+        if last.time() != time(9, 40) or ctx.symbol not in ("AAA", "BBB"):
+            return []
+        close = float(ctx.candles_5m["close"].iloc[-1])
+        entry = close if ctx.symbol == "AAA" else close - 0.5  # BBB: next open (= close) is above its band
+        return [Signal(ctx.symbol, "orb", "long", last.to_pydatetime(), entry, entry - 1.0, ctx.regime,
+                       ctx.market_regime, False, "fake", {})]
+
+    params = replay_params(REPLAY_DAYS[0], REPLAY_DAYS[0])
+    run_id = repo.enqueue_backtest_run(engine, params, at(8, 0))
+    m = run_backtest(settings, engine, params, run_id, cache, universe(["AAA", "BBB", "CCC"]),
+                     classify=fake_classify, detect_all=detect)
+    assert m["trades"] == 1 and m["missed_entries"] == 1 and m["fill_rate"] == 0.5
+    (miss,) = m["missed"]
+    assert {k: miss[k] for k in ("trade_date", "symbol", "strategy", "direction")} == {
+        "trade_date": REPLAY_DAYS[0].isoformat(), "symbol": "BBB", "strategy": "orb", "direction": "long"}
+    assert miss["limit_low"] < miss["limit_high"] < miss["next_open"] and isinstance(miss["signal_id"], int)
+    assert set(m) >= CONTRACT_KEYS

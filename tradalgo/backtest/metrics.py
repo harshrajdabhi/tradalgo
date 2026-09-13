@@ -25,7 +25,8 @@ def _breakdown(trades: list[dict], key: str) -> dict:
     return {k: _summary(v) for k, v in sorted(groups.items())}
 
 
-def compute_metrics(trades: list[dict]) -> dict:
+def compute_metrics(trades: list[dict], missed: list[dict] = ()) -> dict:
+    """missed = accepted plans whose next open fell outside the limit band; fill_rate is None with no accepted plans."""
     net = [float(t["net_r"]) for t in trades]
     no_slip = [float(t["net_r_no_slippage"]) for t in trades]
     gains = sum(r for r in net if r > 0)
@@ -45,4 +46,7 @@ def compute_metrics(trades: list[dict]) -> dict:
         "net_rupees": _round(sum(float(t["net_rupees"]) for t in trades)),
         "by_strategy": _breakdown(trades, "strategy"),
         "by_regime": _breakdown(trades, "regime"),
+        "missed_entries": len(missed),
+        "fill_rate": _round(len(trades) / (len(trades) + len(missed))) if trades or missed else None,
+        "missed": list(missed),
     }

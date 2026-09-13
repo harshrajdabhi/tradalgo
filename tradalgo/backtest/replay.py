@@ -15,7 +15,7 @@ from tradalgo.config import MarketConfig, Settings
 from tradalgo.data.base import INDEX_SYMBOL
 from tradalgo.data.candle_cache import CandleCache
 from tradalgo.data.universe import Constituent, liquid_symbols
-from tradalgo.engine.cycle import BAR, HISTORY_SESSIONS, CycleDeps, SessionState, SymbolFrames, run_cycle
+from tradalgo.engine.cycle import BAR, CycleDeps, SessionState, SymbolFrames, run_cycle
 from tradalgo.risk.plan import TradePlan
 from tradalgo.screener.factors import compute_factors
 from tradalgo.screener.rank import rank_candidates
@@ -159,8 +159,8 @@ class _IntradayCache:
         self.cache = cache
         self._frames: dict[str, tuple[pd.DataFrame, pd.Index]] = {}
 
-    def window(self, symbol: str, day: date) -> pd.DataFrame:
-        """That day's 5m bars plus the previous HISTORY_SESSIONS sessions present in the cache."""
+    def window(self, symbol: str, day: date, sessions: int) -> pd.DataFrame:
+        """That day's 5m bars plus the previous `sessions` sessions, which must all be in the cache."""
         if symbol not in self._frames:
             df = self.cache.load(symbol, "5m")
             self._frames[symbol] = (df, pd.Index(df.index.date))
@@ -168,13 +168,17 @@ class _IntradayCache:
         today = dates == day
         if not today.any():
             raise MissingDataError(f"no 5m candles for {symbol} on {day} in the cache; {BACKFILL_HINT}")
-        prior = sorted(set(dates[dates < day]))[-HISTORY_SESSIONS:]
+        prior = sorted(set(dates[dates < day]))[-sessions:]
+        if len(prior) < sessions:
+            raise MissingDataError(f"only {len(prior)} of {sessions} prior 5m sessions for {symbol} before {day} "
+                                   f"in the cache; {BACKFILL_HINT}")
         return df[today | dates.isin(prior)]
 
 
 def run_backtest(settings: Settings, engine: Engine, params: dict, run_id: int, cache: CandleCache,
                  universe: list[Constituent], progress_cb=lambda pct: None, cancel_cb=lambda: False, *,
                  classify=None, detect_all=None, leverage=lambda symbol: None) -> dict:
+    """Known gap vs live: no historical corporate-event blackout or news (no free source), so news is neutral."""
     s = apply_params(settings, params)
     calendar, days = trading_days(s, date.fromisoformat(params["from"]), date.fromisoformat(params["to"]))
     members = [c for c in universe if params["universe"] == "both" or c.index == params["universe"]]
@@ -200,8 +204,9 @@ def run_backtest(settings: Settings, engine: Engine, params: dict, run_id: int, 
         if cancel_cb():
             raise BacktestCancelled(f"cancelled before {day}")
         picks = backtest_shortlist(s, daily, index_daily, members, day)
-        index_5m = intraday.window(INDEX_SYMBOL, day)
-        frames = {sym: SymbolFrames(intraday.window(sym, day), daily[sym]) for sym in picks}
+        n = max(deps.history_sessions, deps.regime_history_sessions)
+        index_5m = intraday.window(INDEX_SYMBOL, day, n)
+        frames = {sym: SymbolFrames(intraday.window(sym, day, n), daily[sym]) for sym in picks}
         sink = BacktestSink(engine, run_id, broker, frames)
         state = SessionState.new(day, capital)
         for now in cycle_times(day, s.market):
@@ -214,4 +219,4 @@ def run_backtest(settings: Settings, engine: Engine, params: dict, run_id: int, 
 
     if not days:
         progress_cb(100.0)
-    return compute_metrics(sorted(records, key=lambda r: r["exit_ts"]))
+    return compute_metrics(sorted(records, key=lambda r: r["exit_ts"]), broker.missed)

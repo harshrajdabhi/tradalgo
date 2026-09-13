@@ -105,7 +105,7 @@ def build_replay_cache(root, alter_5m=None) -> CandleCache:
         daily = daily_trend(days, 50.0, step)
         frames[(symbol, "1d")] = daily
         five = pd.concat([rising_day(d, float(daily[daily.index.date < d]["close"].iloc[-1]) + 2)
-                          for d in days[-8:]])
+                          for d in days[-25:]])
         frames[(symbol, "5m")] = alter_5m(five) if alter_5m else five
     cache = CandleCache(root, FakeProvider(frames))
     for symbol, resolution in frames:

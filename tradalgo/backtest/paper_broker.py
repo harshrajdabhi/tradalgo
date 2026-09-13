@@ -23,8 +23,10 @@ class PaperBroker:
         return float(next_open) if plan.limit_low <= next_open <= plan.limit_high else None
 
     def miss(self, plan: TradePlan, signal_id: int, next_open: float | None) -> None:
-        self.missed.append({"signal_id": signal_id, "symbol": plan.signal.symbol, "strategy": plan.signal.strategy,
-                            "ts": plan.signal.ts, "next_open": next_open})
+        sig = plan.signal
+        self.missed.append({"signal_id": signal_id, "trade_date": sig.ts.date().isoformat(), "symbol": sig.symbol,
+                            "strategy": sig.strategy, "direction": sig.direction, "next_open": next_open,
+                            "limit_low": plan.limit_low, "limit_high": plan.limit_high})
 
     def open(self, plan: TradePlan, signal_id: int, entry_ts: datetime, fill: float) -> int:
         trade_id = next(self._ids)
