@@ -19,10 +19,10 @@ def _positions(_engine):
 @st.fragment(run_every=15)
 def render() -> None:
     df = _positions(engine)
-    st.dataframe(df, use_container_width=True)
-
     if df.empty:
+        st.info("No trades yet. They will appear here once an alert is marked Taken.")
         return
+    st.dataframe(df, use_container_width=True)
 
     labels = [f"{r.symbol} @ {r.entry_ts}" for r in df.itertuples()]
     choice = st.selectbox("Chart a position", options=range(len(df)), format_func=lambda i: labels[i])
@@ -45,7 +45,7 @@ def render() -> None:
         )
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("No cached candles for this position's day.")
+        st.info("No cached candles for this position's day yet.")
 
 
 render()

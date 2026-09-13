@@ -37,7 +37,7 @@ if current is not None:
         partial_exit_at_r = st.number_input(
             "Partial exit at R", min_value=0.0,
             value=float(current["position_management"]["partial_exit_at_r"]))
-        save = st.form_submit_button("Save")
+        save = st.form_submit_button("Save settings")
 
     if save:
         new_config = copy.deepcopy(current)
@@ -51,7 +51,7 @@ if current is not None:
             current["position_management"], partial_exit_at_r=partial_exit_at_r)
         try:
             controls.save_settings(config_path, new_config)
-            st.success("Settings saved; a backup of the previous config was created.")
+            st.success("Settings saved. The session process will pick this up at its next cycle.")
             st.rerun()
         except Exception as exc:
-            st.error(f"Invalid settings, not saved: {exc}")
+            st.error(f"Settings not saved: {exc}")

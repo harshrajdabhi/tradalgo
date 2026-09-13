@@ -29,11 +29,14 @@ col1.metric("Sent", sent_today)
 col2.metric("Failed", failed)
 col3.metric("Awaiting reply", awaiting)
 
-st.dataframe(df, use_container_width=True)
+if df.empty:
+    st.info("No alerts logged yet for this filter.")
+else:
+    st.dataframe(df, use_container_width=True)
 
 failed_rows = df[df["status"] == "failed"] if not df.empty else df
 for row in failed_rows.itertuples():
-    if st.button(f"Resend alert {row.alert_id}", key=f"resend_{row.alert_id}"):
+    if st.button(f"Resend alert to {row.symbol}", key=f"resend_{row.alert_id}"):
         controls.resend_alert(engine, row.alert_id)
         st.cache_data.clear()
         st.rerun()

@@ -98,3 +98,50 @@ def test_page_renders_with_seeded_db(page, tmp_path, monkeypatch):
     at = AppTest.from_file(str(page))
     at.run(timeout=30)
     assert not at.exception
+
+
+def test_now_strip_priority():
+    from tradalgo.dashboard import theme
+
+    # kill switch wins over everything else
+    state = theme.now_strip_state(
+        kill_switch_on=True, failed_alerts=[{"symbol": "X", "last_error": "e"}],
+        awaiting_alerts=[{"symbol": "Y", "text": "t", "valid_until": "now"}],
+        open_trades=[{"symbol": "Z", "entry_ts": "now"}], next_check="10:00",
+    )
+    assert "Resume alerts" in state.headline
+    assert not state.quiet
+
+    # failed alerts beat awaiting replies and open trades
+    state = theme.now_strip_state(
+        kill_switch_on=False, failed_alerts=[{"symbol": "X", "last_error": "timeout"}],
+        awaiting_alerts=[{"symbol": "Y", "text": "t", "valid_until": "now"}],
+        open_trades=[{"symbol": "Z", "entry_ts": "now"}], next_check="10:00",
+    )
+    assert "X" in state.headline and "timeout" in state.headline
+    assert not state.quiet
+
+    # awaiting replies beat open trades
+    state = theme.now_strip_state(
+        kill_switch_on=False, failed_alerts=[],
+        awaiting_alerts=[{"symbol": "Y", "text": "buy Y", "valid_until": "10:30"}],
+        open_trades=[{"symbol": "Z", "entry_ts": "now"}], next_check="10:00",
+    )
+    assert "Y" in state.headline and "10:30" in state.headline
+    assert not state.quiet
+
+    # open trades beat the quiet fallback
+    state = theme.now_strip_state(
+        kill_switch_on=False, failed_alerts=[], awaiting_alerts=[],
+        open_trades=[{"symbol": "Z", "entry_ts": "09:20"}], next_check="10:00",
+    )
+    assert "Z" in state.headline
+    assert not state.quiet
+
+    # nothing to do: quiet state names the next check time
+    state = theme.now_strip_state(
+        kill_switch_on=False, failed_alerts=[], awaiting_alerts=[], open_trades=[],
+        next_check="10:00",
+    )
+    assert "10:00" in state.headline
+    assert state.quiet

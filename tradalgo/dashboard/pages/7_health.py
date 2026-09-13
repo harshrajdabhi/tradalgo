@@ -35,7 +35,7 @@ st.dataframe(_degraded(engine, "data"), use_container_width=True)
 st.subheader("Websocket status")
 socket_events = _degraded(engine, "socket")
 if socket_events.empty:
-    st.info("No websocket health events logged.")
+    st.info("No websocket issues logged.")
 else:
     st.dataframe(socket_events, use_container_width=True)
 

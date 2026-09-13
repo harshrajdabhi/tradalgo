@@ -25,8 +25,11 @@ def _journal(_engine, date_from, date_to, strategy, symbol):
 
 
 df = _journal(engine, date_from.isoformat(), date_to.isoformat(), strategy, symbol)
-st.dataframe(df, use_container_width=True)
+if df.empty:
+    st.info("No signals in this range yet. Widen the dates or clear the filters.")
+else:
+    st.dataframe(df, use_container_width=True)
 
 st.download_button(
-    "Download CSV", data=df.to_csv(index=False), file_name="journal.csv", mime="text/csv",
+    "Download as CSV", data=df.to_csv(index=False), file_name="journal.csv", mime="text/csv",
 )

@@ -37,9 +37,9 @@ if submitted:
     }
     try:
         controls.queue_backtest(engine, params, datetime.now(IST))
-        st.success("Backtest queued")
+        st.success("Backtest queued. It will run in the background; track progress below.")
     except ValueError as exc:
-        st.error(str(exc))
+        st.error(f"Backtest not queued: {exc}")
 
 
 @st.cache_data(ttl=3)
@@ -51,6 +51,9 @@ def _runs(_engine):
 def render_runs() -> None:
     runs = _runs(engine)
     st.subheader("Runs")
+    if runs.empty:
+        st.info("No backtests yet. Queue one above to check the strategy before trusting live alerts.")
+        return
     for row in runs.itertuples():
         cols = st.columns([1, 1, 1, 2, 1])
         cols[0].write(row.id)
@@ -58,7 +61,7 @@ def render_runs() -> None:
         cols[2].write(row.created_at)
         cols[3].progress(min(max(row.progress_pct or 0, 0), 100) / 100)
         if row.status in ("queued", "running"):
-            if cols[4].button("Cancel", key=f"cancel_{row.id}"):
+            if cols[4].button("Cancel run", key=f"cancel_{row.id}"):
                 controls.request_cancel_backtest(engine, row.id)
                 st.cache_data.clear()
                 st.rerun()
@@ -74,6 +77,22 @@ if not runs_df.empty:
     trades = queries.backtest_run_trades(engine, run_id)
 
     if metrics:
+        trades_n = metrics.get("trades") or 0
+        expectancy = metrics.get("expectancy_r")
+        gate_passed = trades_n >= 100 and expectancy is not None and expectancy > 0
+        if gate_passed:
+            st.markdown(
+                f'<div class="now-strip now-strip--quiet">Gate passed — {trades_n} trades, '
+                f'expectancy {expectancy:.2f}R after costs and slippage.</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            reason = "fewer than 100 trades" if trades_n < 100 else "expectancy is not positive after costs"
+            st.markdown(
+                f'<div class="now-strip">Gate not passed — {reason} ({trades_n} trades, '
+                f'expectancy {expectancy if expectancy is not None else "n/a"}R).</div>',
+                unsafe_allow_html=True,
+            )
         tiles = st.columns(4)
         tiles[0].metric("Trades", metrics.get("trades"))
         tiles[1].metric("Win rate", metrics.get("win_rate"))

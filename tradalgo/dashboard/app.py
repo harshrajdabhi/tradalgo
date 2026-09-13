@@ -6,7 +6,7 @@ import streamlit as st
 from tradalgo.clock import IST, MarketCalendar, load_holidays
 from tradalgo.config import KeyringStore, Settings, load_settings
 from tradalgo.data.fyers_auth import refresh_token_expiry
-from tradalgo.dashboard import controls
+from tradalgo.dashboard import controls, theme
 from tradalgo.storage.db import init_db, make_engine
 
 PAGES = [
@@ -43,7 +43,8 @@ def render_sidebar(settings: Settings) -> None:
     st.sidebar.metric("Market", status)
 
     kill_on = controls.kill_switch_active(settings.paths.data_dir)
-    new_kill_on = st.sidebar.toggle("Kill switch", value=kill_on)
+    new_kill_on = st.sidebar.toggle("Stop all alerts", value=kill_on,
+                                    help="On: no alerts go out. Off: alerts resume as normal.")
     if new_kill_on != kill_on:
         controls.set_kill_switch(settings.paths.data_dir, new_kill_on)
         st.rerun()
@@ -59,6 +60,7 @@ def render_sidebar(settings: Settings) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="TradAlgo", layout="wide")
+    theme.inject_css()
     settings = get_settings()
     render_sidebar(settings)
     nav = st.navigation([st.Page(p) for p in PAGES])

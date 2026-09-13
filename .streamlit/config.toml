@@ -1,0 +1,14 @@
+[theme]
+base = "light"
+primaryColor = "#16233D"
+backgroundColor = "#F3F1EC"
+secondaryBackgroundColor = "#EAE7DF"
+textColor = "#16233D"
+linkColor = "#16233D"
+font = "\"Public Sans\""
+headingFont = "\"Public Sans\""
+baseRadius = "small"
+borderColor = "#D8D9D3"
+
+[server]
+headless = true
