@@ -147,6 +147,8 @@ def cmd_screen(settings, args) -> int:
     def on_fallback(message):
         _record_health_event(engine, now, "data", message)
 
+    # This try/except covers only steps before run_screen: run_screen owns the "screen" job_runs
+    # row itself (start_job_run/finish_job_run), so recording a failure here too would double it up.
     try:
         provider = build_screen_provider(settings, store, trade_date, on_fallback)
         cache = CandleCache(settings.paths.data_dir / "candles", provider)
@@ -154,13 +156,19 @@ def cmd_screen(settings, args) -> int:
         symbols = [c.symbol for c in universe]
         daily_by_symbol = {s: cache.get(s, "1d", start, trade_date - timedelta(days=1)) for s in symbols}
         index_daily = cache.get(INDEX_SYMBOL, "1d", start, trade_date - timedelta(days=1))
+    except Exception as exc:
+        run_id = start_job_run(engine, "screen", now)
+        finish_job_run(engine, run_id, now, error=str(exc))
+        print(f"screen failed: {exc}", file=sys.stderr)
+        return 1
+
+    try:
         picks = run_screen(settings, engine, daily_by_symbol, index_daily, universe, trade_date, now,
                            stop_atr_frac=settings.screener.stop_atr_frac,
                            min_room_r=settings.screener.min_room_r,
                            trigger_zone_atr=settings.screener.trigger_zone_atr)
     except Exception as exc:
-        run_id = start_job_run(engine, "screen", now)
-        finish_job_run(engine, run_id, now, error=str(exc))
+        # run_screen already recorded the failed job_runs row; don't record a second one.
         print(f"screen failed: {exc}", file=sys.stderr)
         return 1
 
@@ -207,18 +215,31 @@ def cmd_preopen(settings, args) -> int:
                              "data, skipping preopen annotation")
         return 0
 
-    cache = CandleCache(settings.paths.data_dir / "candles", provider)
-    prev_close, daily_atr = {}, {}
-    for symbol in symbols:
-        df = cache.load(symbol, "1d")
-        if df.empty:
-            continue
-        prev_close[symbol] = float(df["close"].iloc[-1])
-        if len(df) >= 14:
-            daily_atr[symbol] = float(atr(df).iloc[-1])
+    # Steps before annotate_preopen record their own failure row; annotate_preopen owns the
+    # "preopen" job_runs row itself, so its failures must not be recorded a second time here.
+    try:
+        cache = CandleCache(settings.paths.data_dir / "candles", provider)
+        prev_close, daily_atr = {}, {}
+        for symbol in symbols:
+            df = cache.load(symbol, "1d")
+            if df.empty:
+                continue
+            prev_close[symbol] = float(df["close"].iloc[-1])
+            if len(df) >= 14:
+                daily_atr[symbol] = float(atr(df).iloc[-1])
+    except Exception as exc:
+        run_id = start_job_run(engine, "preopen", now)
+        finish_job_run(engine, run_id, now, error=str(exc))
+        print(f"preopen failed: {exc}", file=sys.stderr)
+        return 1
 
-    results = annotate_preopen(engine, trade_date, quotes, prev_close, daily_atr,
-                               settings.preopen.max_gap_atr, settings.preopen.oppose_gap_atr, now)
+    try:
+        results = annotate_preopen(engine, trade_date, quotes, prev_close, daily_atr,
+                                   settings.preopen.max_gap_atr, settings.preopen.oppose_gap_atr, now)
+    except Exception as exc:
+        # annotate_preopen already recorded the failed job_runs row; don't record a second one.
+        print(f"preopen failed: {exc}", file=sys.stderr)
+        return 1
     by_symbol = {r["symbol"]: r for r in results}
 
     if settings.telegram.enabled:
@@ -268,7 +289,7 @@ def render_launchd_plists(repo_dir: Path, python_path: Path) -> dict[str, str]:
 
 def cmd_install_launchd(settings, args) -> int:
     repo_dir = Path(__file__).resolve().parents[1]
-    python_path = repo_dir / ".venv" / "bin" / "python"
+    python_path = Path(sys.executable)  # the interpreter actually running this command (usually .venv/bin/python)
     dest = Path(args.dest).expanduser()
     rendered = render_launchd_plists(repo_dir, python_path)
 

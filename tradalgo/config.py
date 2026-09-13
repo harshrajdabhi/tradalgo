@@ -31,7 +31,7 @@ class ScreenerConfig(BaseModel):
     factor_weights: dict[str, float]
     stop_atr_frac: float = Field(default=0.3, gt=0)
     trigger_zone_atr: float = Field(default=0.25, gt=0)
-    min_room_r: float = Field(default=2.0, gt=0)
+    min_room_r: float = Field(default=2.0, gt=0)  # 2R-room reject at 07:00 ranking; risk.min_room_r is the trade validator's check
 
     @model_validator(mode="after")
     def _check_weights(self):
@@ -77,7 +77,7 @@ class BacktestConfig(BaseModel):
 class RiskTuning(BaseModel):
     win_prob: float = Field(default=0.40, gt=0, lt=1)
     runner_avg_r: float = Field(default=2.0, gt=0)
-    min_room_r: float = Field(default=2.0, gt=0)
+    min_room_r: float = Field(default=2.0, gt=0)  # trade validator's room-to-target check; screener.min_room_r is the 07:00 ranking reject
     band_fraction_r: float = Field(default=0.1, gt=0)
     trail_bars: int = Field(default=3, ge=1)
 

@@ -8,7 +8,7 @@ from tradalgo.clock import IST, FixedClock
 from tradalgo.data.base import empty_candles
 from tradalgo.storage.db import init_db, make_engine
 from tradalgo.storage.repo import finish_job_run, has_job_succeeded_on, start_job_run
-from tradalgo.storage.schema import alerts, shortlist
+from tradalgo.storage.schema import alerts, job_runs, shortlist
 
 
 UNIVERSE_CSV = "Symbol,Company Name,Industry,Series\nSBIN,State Bank,Financials,EQ\nTCS,TCS Ltd,IT,EQ\n"
@@ -85,6 +85,89 @@ def test_screen_records_failure_on_provider_error(tmp_path, raw_config, monkeypa
     monkeypatch.setattr(cli, "build_screen_provider", boom)
     assert cli.main(["--config", str(cfg_path), "screen", "--date", "2026-09-14"]) == 1
     assert not has_job_succeeded_on(engine, "screen", date(2026, 9, 14))
+
+
+def _failed_screen_rows(engine):
+    with engine.connect() as conn:
+        return conn.execute(
+            select(job_runs.c.id).where(job_runs.c.job == "screen", job_runs.c.status == "failed")
+        ).all()
+
+
+def _failed_preopen_rows(engine):
+    with engine.connect() as conn:
+        return conn.execute(
+            select(job_runs.c.id).where(job_runs.c.job == "preopen", job_runs.c.status == "failed")
+        ).all()
+
+
+def test_screen_records_exactly_one_failure_row_for_pre_run_screen_failure(tmp_path, raw_config, monkeypatch):
+    cfg_path, settings, engine = _setup(tmp_path, raw_config, monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("provider setup blew up")
+
+    monkeypatch.setattr(cli, "build_screen_provider", boom)
+    assert cli.main(["--config", str(cfg_path), "screen", "--date", "2026-09-14"]) == 1
+    assert len(_failed_screen_rows(engine)) == 1
+
+
+def test_screen_records_exactly_one_failure_row_when_run_screen_itself_fails(tmp_path, raw_config, monkeypatch):
+    cfg_path, settings, engine = _setup(tmp_path, raw_config, monkeypatch)
+    monkeypatch.setattr(cli, "build_screen_provider", lambda *a, **k: FakeCandleProvider())
+
+    def fake_run_screen(settings, engine, *a, **k):
+        # Mirrors the real run_screen: it owns the job_runs row for "screen" itself.
+        run_id = start_job_run(engine, "screen", datetime(2026, 9, 14, tzinfo=IST))
+        finish_job_run(engine, run_id, datetime(2026, 9, 14, tzinfo=IST), error="factor computation blew up")
+        raise RuntimeError("factor computation blew up")
+
+    monkeypatch.setattr(cli, "run_screen", fake_run_screen)
+    assert cli.main(["--config", str(cfg_path), "screen", "--date", "2026-09-14"]) == 1
+    assert len(_failed_screen_rows(engine)) == 1
+
+
+class FakeQuoteProvider:
+    def get_quotes(self, symbols):
+        return {s: 100.0 for s in symbols}
+
+
+def test_preopen_records_exactly_one_failure_row_for_pre_annotate_failure(tmp_path, raw_config, monkeypatch):
+    cfg_path, settings, engine = _setup(tmp_path, raw_config, monkeypatch)
+    with engine.begin() as conn:
+        conn.execute(insert(shortlist).values(
+            trade_date="2026-09-14", rank=1, symbol="SBIN", composite_score=80.0,
+            factor_scores_json='{"direction": "long"}', reasons="ok", demoted=0))
+
+    monkeypatch.setattr(cli, "build_fyers_quote_provider", lambda *a, **k: FakeQuoteProvider())
+
+    def boom(*a, **k):
+        raise RuntimeError("cache disk full")
+
+    monkeypatch.setattr(cli, "CandleCache", boom)
+    assert cli.main(["--config", str(cfg_path), "preopen", "--date", "2026-09-14"]) == 1
+    assert len(_failed_preopen_rows(engine)) == 1
+
+
+def test_preopen_records_exactly_one_failure_row_when_annotate_preopen_itself_fails(tmp_path, raw_config,
+                                                                                     monkeypatch):
+    cfg_path, settings, engine = _setup(tmp_path, raw_config, monkeypatch)
+    with engine.begin() as conn:
+        conn.execute(insert(shortlist).values(
+            trade_date="2026-09-14", rank=1, symbol="SBIN", composite_score=80.0,
+            factor_scores_json='{"direction": "long"}', reasons="ok", demoted=0))
+
+    monkeypatch.setattr(cli, "build_fyers_quote_provider", lambda *a, **k: FakeQuoteProvider())
+
+    def fake_annotate_preopen(engine, trade_date, quotes, prev_close, daily_atr, max_gap_atr, oppose_gap_atr, now):
+        # Mirrors the real annotate_preopen: it owns the job_runs row for "preopen" itself.
+        run_id = start_job_run(engine, "preopen", now)
+        finish_job_run(engine, run_id, now, error="db write blew up")
+        raise RuntimeError("db write blew up")
+
+    monkeypatch.setattr(cli, "annotate_preopen", fake_annotate_preopen)
+    assert cli.main(["--config", str(cfg_path), "preopen", "--date", "2026-09-14"]) == 1
+    assert len(_failed_preopen_rows(engine)) == 1
 
 
 def test_preopen_skips_without_shortlist(tmp_path, raw_config, monkeypatch, capsys):
