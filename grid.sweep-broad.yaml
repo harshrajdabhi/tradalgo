@@ -1,0 +1,48 @@
+# Broad walk-forward sweep: all strategies and exit rules, ~200 sampled combinations (~10 h, 4 workers).
+# Run: .venv/bin/tradalgo sweep --grid grid.sweep-broad.yaml --workers 4
+# Interrupted? Re-run with --resume data/reports/sweep-<timestamp>.partial.jsonl
+#
+# Ranking uses the train period only (2025-10-15 → 2026-04-30); the top 10 are re-checked on the
+# test period (2026-05-01 → 2026-09-11). Slippage stays 0.05% per order from config.yaml.
+# Before trusting any result, verify data_static/nse_holidays_2025.yaml against the NSE circular.
+overrides:
+  strategies:
+    orb:
+      window_end: ["10:00", "10:30", "11:00"]
+      params:
+        min_rvol: [1.2, 1.5, 2.0]
+        or_minutes: [15, 30]
+    gap:
+      enabled: [true, false]
+      params:
+        min_gap_pct: [0.5, 1.0]
+    vwap:
+      enabled: [true, false]
+      window_end: ["11:00", "14:00"]
+      params:
+        min_wick_ratio: [0.5, 0.65]
+    range_breakout:
+      enabled: [true, false]
+      params:
+        min_rvol: [1.5, 2.0]
+    pullback:
+      enabled: [false, true]
+      params:
+        expansion_atr: [2.0, 3.0]
+    pdhl:
+      enabled: [false, true]
+  position_management:
+    stop_atr_min: [0.5, 0.8, 1.0]
+    partial_exit_at_r: [1.5, 2.0]
+    runner_target_r: [3.0]
+    breakeven_after_partial: [true, false]
+  risk:
+    trail_bars: [3, 5]
+  regime:
+    adx_trend: [20.0, 25.0]
+
+max_combinations: 200
+seed: 7
+min_train_trades: 40
+top_k: 10
+drawdown_penalty: 0.02
