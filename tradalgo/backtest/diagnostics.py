@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 import pandas as pd
 from sqlalchemy import Engine, select
 
-from tradalgo.backtest.metrics import compute_metrics
 from tradalgo.clock import IST
 from tradalgo.storage.schema import backtest_runs, backtest_trades, decisions, signals
 
@@ -91,7 +90,7 @@ def _mfe_buckets(df: pd.DataFrame) -> dict:
 
 
 _NUM_RE = re.compile(r"-?\d+\.?\d*")
-_SYMBOL_PAIR_RE = re.compile(r"on \S+/\S+")
+_SYMBOL_PAIR_RE = re.compile(r"on \w+/\w+")
 
 
 def _reason_category(reason: str) -> str:
@@ -105,12 +104,50 @@ def _reason_category(reason: str) -> str:
     return text.strip()
 
 
+_OVERALL_KEYS = ("trades", "win_rate", "expectancy_r", "expectancy_r_no_slippage", "profit_factor",
+                 "max_drawdown_r", "net_r", "net_rupees", "missed_entries", "fill_rate")
+
+
+def _overall_metrics(run: RunData, trades: pd.DataFrame) -> dict:
+    """Headline metrics for the Overall section.
+
+    Prefer the run's own stored metrics_json: it was computed by run_backtest from PaperBroker's raw
+    per-trade records, which carry columns (net_r_no_slippage, net_rupees) that backtest_trades does
+    not persist. Recomputing from backtest_trades alone can only use what that table has (net_r), so
+    recomputing expectancy_r_no_slippage from it would silently equal expectancy_r — instead of that,
+    fall back to a plain net_r summary and omit any metric that needs a column we don't have.
+    """
+    if run.metrics:
+        return {k: run.metrics[k] for k in _OVERALL_KEYS if k in run.metrics}
+    net = trades["net_r"].tolist() if not trades.empty else []
+    n = len(net)
+    if n == 0:
+        return {"trades": 0, "win_rate": 0.0, "expectancy_r": 0.0}
+    gains = sum(r for r in net if r > 0)
+    losses = sum(r for r in net if r < 0)
+    cum = peak = drawdown = 0.0
+    for r in net:
+        cum += r
+        peak = max(peak, cum)
+        drawdown = max(drawdown, peak - cum)
+    return {
+        "trades": n,
+        "win_rate": round(sum(r > 0 for r in net) / n, 4),
+        "expectancy_r": round(sum(net) / n, 4),
+        "profit_factor": round(gains / abs(losses), 4) if losses < 0 else None,
+        "max_drawdown_r": round(drawdown, 4),
+        "net_r": round(sum(net), 4),
+        # expectancy_r_no_slippage and net_rupees need columns backtest_trades doesn't have; omitted
+        # rather than faked (backtest_trades has no net_r_no_slippage / net_rupees columns).
+    }
+
+
 def diagnose(run: RunData) -> dict:
     trades = run.trades
     report: dict = {"run_id": run.run_id}
 
     if trades.empty:
-        report["overall"] = compute_metrics([], run.metrics.get("missed", []))
+        report["overall"] = _overall_metrics(run, trades)
         report["by_strategy"] = {}
         report["by_regime"] = {}
         report["by_hour"] = {}
@@ -123,8 +160,7 @@ def diagnose(run: RunData) -> dict:
         report["rejections"] = {}
         return report
 
-    trade_records = trades.assign(net_rupees=0.0, net_r_no_slippage=trades["net_r"]).to_dict("records")
-    report["overall"] = compute_metrics(trade_records, run.metrics.get("missed", []))
+    report["overall"] = _overall_metrics(run, trades)
 
     report["by_strategy"] = _group_summary(trades, "strategy")
     report["by_regime"] = _group_summary(trades, "regime")

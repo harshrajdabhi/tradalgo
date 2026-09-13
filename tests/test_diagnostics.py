@@ -3,7 +3,7 @@ import json
 import pytest
 from sqlalchemy import insert
 
-from tradalgo.backtest.diagnostics import diagnose, load_run, render_markdown
+from tradalgo.backtest.diagnostics import _reason_category, diagnose, load_run, render_markdown
 from tradalgo.cli import main
 from tradalgo.storage.db import init_db, make_engine
 from tradalgo.storage.schema import backtest_runs, backtest_trades, decisions, signals
@@ -26,12 +26,20 @@ def _signal(conn, *, strategy, direction, regime, backtest_run_id):
 
 def seed_run(engine) -> int:
     with engine.begin() as conn:
+        # expectancy_r_no_slippage (-0.05) is deliberately different from the rows' net_r mean
+        # (0.2 / 3 = 0.0667): backtest_trades has no net_r_no_slippage column, so the stored
+        # metrics_json value is the only correct source for it.
         run_id = conn.execute(insert(backtest_runs).values(
             created_at="2026-09-12T00:00:00+05:30", status="done", params_json="{}",
-            metrics_json=json.dumps({"missed": [
-                {"signal_id": 999, "trade_date": "2026-03-03", "symbol": "BBB", "strategy": "orb",
-                 "direction": "long", "next_open": 101.0, "limit_low": 100.0, "limit_high": 100.5},
-            ]}),
+            metrics_json=json.dumps({
+                "trades": 3, "win_rate": 0.3333, "expectancy_r": 0.0667,
+                "expectancy_r_no_slippage": -0.05, "profit_factor": 1.15, "max_drawdown_r": 1.0,
+                "net_r": 0.2, "net_rupees": 123.45, "missed_entries": 1, "fill_rate": 0.75,
+                "missed": [
+                    {"signal_id": 999, "trade_date": "2026-03-03", "symbol": "BBB", "strategy": "orb",
+                     "direction": "long", "next_open": 101.0, "limit_low": 100.0, "limit_high": 100.5},
+                ],
+            }),
         )).inserted_primary_key[0]
 
         # orb winner: exits via runner_exit, mfe well past 1R -> not a "losers never reach 0.5R" case.
@@ -154,6 +162,48 @@ def test_rejections_by_strategy_and_reason(engine):
     report = diagnose(load_run(engine, seed_run(engine)))
     assert report["rejections"]["gap"]["low_room"] == 2
     assert report["rejections"]["orb"]["cost_r"] == 1
+
+
+def test_overall_takes_expectancy_r_no_slippage_from_stored_metrics_json(engine):
+    run = load_run(engine, seed_run(engine))
+    net_r_mean = round(run.trades["net_r"].mean(), 4)
+    report = diagnose(run)
+    # the stored value differs from what recomputing off backtest_trades' net_r would give -
+    # asserting against net_r_mean pins down that the bug (silently falling back to net_r) is fixed.
+    assert report["overall"]["expectancy_r_no_slippage"] == -0.05
+    assert report["overall"]["expectancy_r_no_slippage"] != net_r_mean
+    assert report["overall"]["trades"] == 3
+    assert report["overall"]["net_rupees"] == 123.45
+
+
+def test_overall_falls_back_and_omits_no_slippage_without_metrics_json(engine):
+    run_id = seed_run(engine)
+    run = load_run(engine, run_id)
+    run.metrics = {}  # simulate an old/blank metrics_json
+    report = diagnose(run)
+    assert report["overall"]["trades"] == 3
+    assert report["overall"]["expectancy_r"] == round(run.trades["net_r"].mean(), 4)
+    assert "expectancy_r_no_slippage" not in report["overall"]
+    assert "net_rupees" not in report["overall"]
+
+
+def test_render_markdown_shows_stored_no_slippage_value(engine):
+    report = diagnose(load_run(engine, seed_run(engine)))
+    md = render_markdown(report)
+    assert "-0.0500" in md
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("insufficient room: level 5713.0 is 0.39R away (< 2.0R)", "insufficient room"),
+    ("qty is 0 (capital 10926.69, risk/share 150.00, leverage 3.0)", "qty is #"),
+    ("expected value -0.021R <= 0 after costs", "expected value #R <= # after costs"),
+    ("not independent: same symbol ABB already traded today", "not independent"),
+    ("max trades per day reached (2/2)", "max trades per day reached"),
+    ("after a -1R loss on PNB/gap, second trade needs a different strategy",
+     "after a #R loss on <symbol/strategy>, second trade needs a different strategy"),
+])
+def test_reason_category_collapses_variable_detail(reason, expected):
+    assert _reason_category(reason) == expected
 
 
 def test_render_markdown_has_key_sections(engine):
