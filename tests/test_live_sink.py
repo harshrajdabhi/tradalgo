@@ -35,10 +35,11 @@ def open_trade(engine, **kw):
     return s, s.accept(plan, sid), sid
 
 
-def tap(engine, action="taken"):
+def tap(engine, action="taken", price=None):
     alert_id = rows(engine, alerts)[0]["id"]
     with engine.begin() as conn:
-        return conn.execute(insert(user_actions).values(alert_id=alert_id, action=action, ts=at(9, 41).isoformat())
+        return conn.execute(insert(user_actions).values(alert_id=alert_id, action=action, price=price,
+                                                        ts=at(9, 41).isoformat())
                             ).inserted_primary_key[0]
 
 
@@ -54,7 +55,8 @@ def test_accept_records_signal_decision_trade_and_degraded_entry_alert(engine):
     assert (t["id"], t["signal_id"], t["taken_by_user"], t["qty"], t["entry_price"]) == (trade_id, sid, 0, 100, 100.0)
     a = rows(engine, alerts)
     assert len(a) == 1 and a[0]["alert_type"] == "entry" and a[0]["signal_id"] == sid and "DEGRADED" in a[0]["text"]
-    s.record_decision(sid, Rejection(make_signal(), "nope"))
+    rejected = make_signal("BBB", ts=at(9, 35))
+    s.record_decision(s.record_signal(rejected), Rejection(rejected, "nope"))
     assert rows(engine, decisions)[1]["rejection_reason"] == "nope"
 
 
@@ -104,3 +106,29 @@ def test_single_qty_partial_closes_trade(engine):
     s.emit_event(ev("partial_exit", trade_id, 102.0, 1, 2.0), taken=False)
     t = rows(engine, paper_trades)[0]
     assert t["exit_reason"] == "partial_exit" and t["net_r"] == pytest.approx(2.0 - 50)
+
+
+def test_recording_is_idempotent_against_the_db(engine):
+    s, trade_id, sid = open_trade(engine)
+    sig = make_signal(ts=at(9, 35))
+    again = sink(engine)
+    assert again.record_signal(sig) == sid
+    again.record_decision(sid, make_plan(sig, qty=100))
+    assert again.accept(make_plan(sig, qty=100), sid) == trade_id
+    assert len(rows(engine, signals)) == 1 and len(rows(engine, decisions)) == 1
+    assert len(rows(engine, paper_trades)) == 1 and len(rows(engine, alerts)) == 1
+
+
+def test_excursions_and_adverse_slippage(engine):
+    s, trade_id, _ = open_trade(engine)
+    s.record_excursions(trade_id, 1.5, -0.25)
+    tap(engine, price=100.2)
+    s.newly_taken_trade_ids(0)
+    t = rows(engine, paper_trades)[0]
+    assert (t["mfe_r"], t["mae_r"]) == (1.5, -0.25) and t["slippage_rupees"] == pytest.approx(20.0)
+
+
+def test_slippage_null_without_price(engine):
+    s, trade_id, _ = open_trade(engine)
+    tap(engine)
+    assert s.is_taken(trade_id) and rows(engine, paper_trades)[0]["slippage_rupees"] is None

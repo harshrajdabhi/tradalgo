@@ -9,8 +9,8 @@ from tradalgo.engine.live_sink import LiveSink
 from tradalgo.engine.session import LiveSession, in_window, poll_telegram_updates, schedule, status_text_for
 from tradalgo.storage.schema import alerts, health_events, job_runs, paper_trades, signals, user_actions
 from tests.backtest_fixtures import TODAY, at, make_signal
-from tests.session_fixtures import (FakeCache, FakeProvider, calendar, cycle_times, detector, fake_classify,
-                                    frames, make_db)
+from tests.session_fixtures import (FakeProvider, calendar, cycle_times, detector, fake_classify, frames, make_cache,
+                                    make_db)
 
 
 class Clk:
@@ -46,14 +46,14 @@ def env(settings, tmp_path):
     return s, make_db(tmp_path), tmp_path
 
 
-def make_session(env, cache=None, extra=None, streams=None, clock=None):
+def make_session(env, provider=None, extra=None, streams=None, clock=None, sink_cls=LiveSink):
     s, engine, tmp = env
-    cache = cache or FakeCache(frames(), FakeProvider())
+    cache = make_cache(tmp, provider or FakeProvider(frames()))
     clock = clock or Clk(at(9, 20))
     streams = streams if streams is not None else []
     factory = lambda on_tick: streams.append(FakeStream(on_tick)) or streams[-1]
     session = LiveSession(s, engine, clock, cache.provider, cache,
-                          lambda degraded_fn: LiveSink(engine, clock, degraded_fn, True),
+                          lambda degraded_fn: sink_cls(engine, clock, degraded_fn, True),
                           tick_stream_factory=factory, state_dir=tmp / "state", calendar=calendar(s),
                           cycle_overrides={"classify": fake_classify, "detect_all": detector(extra),
                                            "levels": lambda daily, c5, now: []})
@@ -101,6 +101,7 @@ def test_shadow_day_taken_alert_sequence(env):
     assert trade["taken_by_user"] == 1 and trade["exit_reason"] == "hard_exit"
     assert session.state.risk.trades_taken == 1
     assert session.state.risk.realized_r == pytest.approx(trade["net_r"])
+    assert trade["mfe_r"] > 2 and trade["mae_r"] <= 0
     assert len(q(engine, signals)) == 1
 
     clock.dt = at(15, 31)
@@ -158,7 +159,7 @@ def test_kill_switch_blocks_entries_but_manages_taken_trade(env):
 
 def test_degraded_provider_marks_entry_and_warns_once(env):
     _, engine, _ = env
-    session, clock = make_session(env, cache=FakeCache(frames(), FakeProvider(degraded=True)))
+    session, clock = make_session(env, provider=FakeProvider(frames(), degraded=True))
     session.start(TODAY)
     run(session, clock, at(9, 20), at(9, 50))
     assert "DEGRADED" in q(engine, alerts)[0]["text"]
@@ -168,10 +169,10 @@ def test_degraded_provider_marks_entry_and_warns_once(env):
 
 def test_cycle_exception_is_recorded_and_next_cycle_works(env):
     _, engine, _ = env
-    cache = FakeCache(frames(), FakeProvider())
-    session, clock = make_session(env, cache=cache)
+    provider = FakeProvider(frames())
+    session, clock = make_session(env, provider=provider)
     session.start(TODAY)
-    cache.fail_next = True
+    provider.fail_next = True
     session.run_once(at(9, 40))
     errors = [h for h in q(engine, health_events) if h["component"] == "session" and h["level"] == "error"]
     assert len(errors) == 1 and "boom" in errors[0]["message"]
@@ -183,7 +184,7 @@ def test_cycle_exception_is_recorded_and_next_cycle_works(env):
 def test_tick_stop_between_cycles_alerts_once(env):
     _, engine, _ = env
     streams = []
-    session, clock = make_session(env, cache=FakeCache(frames(stop_bar=True), FakeProvider()), streams=streams)
+    session, clock = make_session(env, provider=FakeProvider(frames(stop_bar=True)), streams=streams)
     session.start(TODAY)
     run(session, clock, at(9, 20), at(9, 40))
     assert streams[0].started and streams[0].subscribed == {"AAA"}
@@ -246,3 +247,71 @@ def test_poll_telegram_updates_persists_offset(env):
     assert poll_telegram_updates(engine, client, Clk(at(10, 0)), tmp, 7, status, path) == 42
     assert client.offsets == [0, 42] and json.loads(path.read_text())["offset"] == 42
     assert "AAA" in client.sent[0] and "Kill switch: off" in client.sent[0]
+
+
+def test_each_cycle_refetches_todays_bars_through_the_real_cache(env):
+    _, engine, tmp = env
+    provider = FakeProvider(frames())
+    session, clock = make_session(env, provider=provider)
+    session.start(TODAY)
+    provider.cutoff = clock.dt = at(9, 40).replace(second=30)
+    session.run_once(at(9, 40))
+    tap(engine)
+    provider.cutoff = clock.dt = at(9, 50).replace(second=5)
+    session.run_once(at(9, 50))
+    assert kinds(engine)[:2] == ["entry", "partial_exit"]
+    assert max(session.cache.load("AAA", "5m").index.date) < TODAY   # today's partial bars never persisted
+
+
+class CrashAfter(LiveSink):
+    """Simulates the process dying right after a DB write, before the session saves its state."""
+    crash_on: str = "accept"
+
+    def accept(self, plan, signal_id):
+        trade_id = super().accept(plan, signal_id)
+        if self.crash_on == "accept":
+            raise SystemExit("crash")
+        return trade_id
+
+    def emit_event(self, event, taken):
+        super().emit_event(event, taken)
+        if self.crash_on == "exit" and event.kind == "stop_hit":
+            raise SystemExit("crash")
+
+
+def crash_run(session, clock, start, end):
+    try:
+        run(session, clock, start, end)
+    except SystemExit:
+        pass
+
+
+def test_crash_between_accept_and_save_adopts_the_db_trade(env):
+    _, engine, _ = env
+    first, clock = make_session(env, sink_cls=CrashAfter)
+    first.start(TODAY)
+    crash_run(first, clock, at(9, 20), at(9, 40))
+    fresh, clock = make_session(env, clock=Clk(at(9, 45)))
+    assert fresh.start(TODAY)
+    fresh.run_once(at(9, 45))
+    tap(engine)
+    run(fresh, clock, at(9, 50), at(10, 0))
+    assert len(q(engine, signals)) == 1 and len(q(engine, paper_trades)) == 1
+    assert kinds(engine).count("entry") == 1 and "partial_exit" in kinds(engine)
+    assert fresh.state.risk.trades_taken == 1
+
+
+def test_crash_after_exit_before_save_does_not_realert(env):
+    _, engine, _ = env
+    CrashExit = type("CrashExit", (CrashAfter,), {"crash_on": "exit"})
+    first, clock = make_session(env, provider=FakeProvider(frames(stop_bar=True)), sink_cls=CrashExit)
+    first.start(TODAY)
+    run(first, clock, at(9, 20), at(9, 40))
+    tap(engine)
+    crash_run(first, clock, at(9, 45), at(9, 45))
+    fresh, clock = make_session(env, provider=FakeProvider(frames(stop_bar=True)), clock=Clk(at(9, 50)))
+    fresh.start(TODAY)
+    run(fresh, clock, at(9, 50), at(10, 0))
+    assert kinds(engine) == ["entry", "stop_hit"]
+    assert fresh.state.risk.trades_taken == 1 and fresh.state.risk.realized_r < -1
+    assert fresh.state.risk.open_trade_symbols == []

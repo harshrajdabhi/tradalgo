@@ -23,7 +23,14 @@ class LiveSink:
         self.alerts_enabled, self.cost_rupees = alerts_enabled, cost_rupees
 
     def record_signal(self, signal) -> int:
+        ts = to_ist(signal.ts).isoformat()
         with self.engine.begin() as conn:
+            # a restart can re-detect a signal whose row was written before the state save
+            existing = conn.execute(select(signals.c.id).where(
+                signals.c.mode == "live", signals.c.symbol == signal.symbol,
+                signals.c.strategy == signal.strategy, signals.c.ts == ts)).scalar()
+            if existing is not None:
+                return existing
             return conn.execute(insert(signals).values(
                 ts=to_ist(signal.ts).isoformat(), symbol=signal.symbol, strategy=signal.strategy,
                 direction=signal.direction, regime=signal.regime.value, market_regime=signal.market_regime.value,
@@ -40,10 +47,14 @@ class LiveSink:
         else:
             values = dict(accepted=0, rejection_reason=decision.reason)
         with self.engine.begin() as conn:
-            conn.execute(insert(decisions).values(signal_id=signal_id, **values))
+            if conn.execute(select(decisions.c.id).where(decisions.c.signal_id == signal_id)).first() is None:
+                conn.execute(insert(decisions).values(signal_id=signal_id, **values))
 
     def accept(self, plan: TradePlan, signal_id: int) -> int:
         with self.engine.begin() as conn:
+            existing = conn.execute(select(paper_trades.c.id).where(paper_trades.c.signal_id == signal_id)).scalar()
+            if existing is not None:
+                return existing
             trade_id = conn.execute(insert(paper_trades).values(
                 signal_id=signal_id, taken_by_user=0, entry_ts=to_ist(plan.signal.ts).isoformat(),
                 entry_price=plan.signal.entry, qty=plan.qty,
@@ -78,25 +89,40 @@ class LiveSink:
                               net_r=gross - self.cost_rupees / risk_rupees)
             conn.execute(update(paper_trades).where(paper_trades.c.id == event.trade_id).values(**values))
 
+    def record_excursions(self, trade_id: int, mfe_r: float, mae_r: float) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(update(paper_trades).where(paper_trades.c.id == trade_id).values(mfe_r=mfe_r, mae_r=mae_r))
+
     def _taken_query(self):
-        return (select(user_actions.c.id, user_actions.c.action, paper_trades.c.id.label("trade_id"))
+        return (select(user_actions.c.id, user_actions.c.action, user_actions.c.price,
+                       paper_trades.c.id.label("trade_id"), paper_trades.c.qty, signals.c.entry, signals.c.direction)
                 .join(alerts, alerts.c.id == user_actions.c.alert_id)
                 .join(paper_trades, paper_trades.c.signal_id == alerts.c.signal_id)
+                .join(signals, signals.c.id == paper_trades.c.signal_id)
                 .where(alerts.c.alert_type == "entry"))
+
+    @staticmethod
+    def _mark_taken(conn, row) -> None:
+        slippage = None
+        if row["price"] is not None:
+            sign = 1 if row["direction"] == "long" else -1
+            slippage = sign * (row["price"] - row["entry"]) * row["qty"]  # positive = paid worse than plan
+        conn.execute(update(paper_trades).where(paper_trades.c.id == row["trade_id"]).values(
+            taken_by_user=1, slippage_rupees=slippage))
 
     def is_taken(self, trade_id: int) -> bool:
         with self.engine.begin() as conn:
-            taken = conn.execute(self._taken_query().where(
-                paper_trades.c.id == trade_id, user_actions.c.action == "taken").limit(1)).first() is not None
-            if taken:
-                conn.execute(update(paper_trades).where(paper_trades.c.id == trade_id).values(taken_by_user=1))
-        return taken
+            row = conn.execute(self._taken_query().where(
+                paper_trades.c.id == trade_id, user_actions.c.action == "taken").limit(1)).mappings().first()
+            if row is not None:
+                self._mark_taken(conn, row)
+        return row is not None
 
     def newly_taken_trade_ids(self, since_id: int) -> tuple[list[int], int]:
         with self.engine.begin() as conn:
             found = conn.execute(self._taken_query().where(user_actions.c.id > since_id)
                                  .order_by(user_actions.c.id)).mappings().all()
-            ids = [r["trade_id"] for r in found if r["action"] == "taken"]
-            if ids:
-                conn.execute(update(paper_trades).where(paper_trades.c.id.in_(ids)).values(taken_by_user=1))
-        return ids, max((r["id"] for r in found), default=since_id)
+            taken = [r for r in found if r["action"] == "taken"]
+            for r in taken:
+                self._mark_taken(conn, r)
+        return [r["trade_id"] for r in taken], max((r["id"] for r in found), default=since_id)

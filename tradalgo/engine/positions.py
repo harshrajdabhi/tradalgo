@@ -23,8 +23,10 @@ class ManagedTrade:
     remaining: int
     partial_done: bool = False
     closed: bool = False
-    last_ts: str | None = None
-    last_closed: bool = False
+    last_bar_ts: str | None = None
+    last_tick_ts: str | None = None
+    mfe_r: float = 0.0
+    mae_r: float = 0.0
     closed_highs: list[float] = field(default_factory=list)
     closed_lows: list[float] = field(default_factory=list)
 
@@ -44,8 +46,9 @@ class ManagedTrade:
 class PositionManager:
     """Pure in-memory exit state machine shared by live session and backtest.
 
-    Updates for a trade are ordered by (ts, bar_closed); anything not strictly newer is ignored, so
-    replays are idempotent.
+    Closed bars and ticks have separate cursors: a bar is applied iff its close ts is newer than the last
+    bar, so a tick landing between a bar's close and the cycle cannot swallow that bar; a tick is applied
+    iff newer than both the last tick and the last bar. Replays are idempotent.
     """
 
     def __init__(self, partial_fraction: float = 0.6, trail_bars: int = 3, hard_exit: time = time(15, 0)):
@@ -66,14 +69,31 @@ class PositionManager:
     def open_trades(self) -> list[ManagedTrade]:
         return [t for t in self._trades.values() if not t.closed]
 
+    def trades(self) -> list[ManagedTrade]:
+        return list(self._trades.values())
+
+    def close(self, trade_id: int) -> None:
+        """Crash recovery: the exit was already recorded elsewhere, stop managing without emitting."""
+        t = self._trades[trade_id]
+        t.remaining, t.closed = 0, True
+
     def on_price(self, ts: datetime, high: float, low: float, close: float, bar_closed: bool,
                  open: float | None = None) -> list[PositionEvent]:
         """Ticks carry tick time; closed bars MUST be stamped with bar CLOSE time (start + 5 min)."""
         events: list[PositionEvent] = []
         for t in self.open_trades():
-            if t.last_ts is not None and (ts, bar_closed) <= (datetime.fromisoformat(t.last_ts), t.last_closed):
-                continue
-            t.last_ts, t.last_closed = ts.isoformat(), bar_closed
+            last_bar = datetime.fromisoformat(t.last_bar_ts) if t.last_bar_ts else None
+            last_tick = datetime.fromisoformat(t.last_tick_ts) if t.last_tick_ts else None
+            if bar_closed:
+                if last_bar is not None and ts <= last_bar:
+                    continue
+                t.last_bar_ts = ts.isoformat()
+            else:
+                if (last_tick is not None and ts <= last_tick) or (last_bar is not None and ts <= last_bar):
+                    continue
+                t.last_tick_ts = ts.isoformat()
+            fav, adv = (high, low) if t.long else (low, high)
+            t.mfe_r, t.mae_r = max(t.mfe_r, t.r_of(fav)), min(t.mae_r, t.r_of(adv))
             events += self._update(t, ts, high, low, close, bar_closed, close if open is None else open)
         return events
 
@@ -142,7 +162,9 @@ class PositionManager:
     @classmethod
     def from_dict(cls, d: dict) -> "PositionManager":
         pm = cls(d["partial_fraction"], d["trail_bars"], time.fromisoformat(d["hard_exit"]))
+        known = set(ManagedTrade.__dataclass_fields__)
         for td in d["trades"]:
+            td = {k: v for k, v in td.items() if k in known}  # drops the pre-split last_ts/last_closed cursor
             t = ManagedTrade(**{**td, "closed_highs": list(td["closed_highs"]), "closed_lows": list(td["closed_lows"])})
             pm._trades[t.trade_id] = t
         return pm

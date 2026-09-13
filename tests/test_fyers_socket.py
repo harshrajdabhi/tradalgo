@@ -62,3 +62,14 @@ def test_unsubscribe_and_stop():
     sock.kwargs["on_error"]({"code": -1})
     stream.stop()
     assert sock.closed and any("error" in s for s in statuses)
+
+
+def test_stale_feed_time_falls_back_to_clock():
+    ticks = []
+    stream = make(ticks, [])
+    stream.start()
+    sock = FakeSocket.instances[-1]
+    newer = int(datetime(2026, 9, 15, 9, 59, 50, tzinfo=IST).timestamp())
+    sock.kwargs["on_message"]({"symbol": "NSE:SBIN-EQ", "ltp": 1.0, "exch_feed_time": newer})
+    sock.kwargs["on_message"]({"symbol": "NSE:SBIN-EQ", "ltp": 2.0, "exch_feed_time": newer - 3600})
+    assert ticks[1][1] == datetime(2026, 9, 15, 10, 0, tzinfo=IST)

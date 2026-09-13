@@ -169,26 +169,33 @@ def _manage_open_trades(state: SessionState, views: dict, deps: CycleDeps, sink:
         start, bar = c5.index[-1], c5.iloc[-1]
         events = pm.on_price((start + BAR).to_pydatetime(), float(bar["high"]), float(bar["low"]),
                              float(bar["close"]), True, open=float(bar["open"]))
-        still_open = {t.trade_id for t in pm.open_trades()}
-        for ev in events:
-            meta = state.trades[ev.trade_id]
-            meta["gross_r"] += float(ev.r_multiple) * ev.qty / meta["qty"]
-            taken = sink.is_taken(ev.trade_id)
-            if taken:
-                register_taken(state, ev.trade_id)
-            sink.emit_event(ev, taken)
-        for trade_id in sorted({ev.trade_id for ev in events} - still_open):
-            meta = state.trades[trade_id]
-            meta["closed"] = True
-            if trade_id in state.taken_trade_ids:
-                state.risk = register_exit(state.risk, symbol, meta["gross_r"] - _cost_r(deps.settings, meta))
+        route_events(state, pm, events, deps.settings, sink)
 
 
-def _enter(state: SessionState, plan: TradePlan, signal_id: int, deps: CycleDeps, sink: CycleSink) -> None:
-    trade_id = sink.accept(plan, signal_id)
-    if trade_id is None:
-        return
-    s, sig = deps.settings, plan.signal
+def route_events(state: SessionState, pm: PositionManager, events: list[PositionEvent], settings: Settings,
+                 sink: CycleSink) -> None:
+    """Book exit legs into state, emit each event with its taken flag, and count taken exits in risk state.
+
+    Shared by closed-bar management here and live tick management.
+    """
+    still_open = {t.trade_id for t in pm.open_trades()}
+    for ev in events:
+        meta = state.trades[ev.trade_id]
+        meta["gross_r"] += float(ev.r_multiple) * ev.qty / meta["qty"]
+        taken = sink.is_taken(ev.trade_id)
+        if taken:
+            register_taken(state, ev.trade_id)
+        sink.emit_event(ev, taken)
+    for trade_id in sorted({ev.trade_id for ev in events} - still_open):
+        meta = state.trades[trade_id]
+        meta["closed"] = True
+        if trade_id in state.taken_trade_ids:
+            state.risk = register_exit(state.risk, meta["symbol"], meta["gross_r"] - _cost_r(settings, meta))
+
+
+def open_position(state: SessionState, plan: TradePlan, trade_id: int, settings: Settings) -> None:
+    """Start managing an accepted trade. Live crash recovery reuses this to re-open DB trades."""
+    s, sig = settings, plan.signal
     pm = state.position_manager.get(sig.symbol)
     if pm is None:
         pm = state.position_manager[sig.symbol] = PositionManager(
@@ -197,6 +204,14 @@ def _enter(state: SessionState, plan: TradePlan, signal_id: int, deps: CycleDeps
     pm.open(trade_id, plan)
     state.trades[trade_id] = {"symbol": sig.symbol, "strategy": sig.strategy, "qty": plan.qty,
                               "risk_per_share": sig.risk_per_share, "gross_r": 0.0, "closed": False}
+    state.seen_signals.add((sig.symbol, sig.strategy, sig.ts.isoformat()))
+
+
+def _enter(state: SessionState, plan: TradePlan, signal_id: int, deps: CycleDeps, sink: CycleSink) -> None:
+    trade_id = sink.accept(plan, signal_id)
+    if trade_id is None:
+        return
+    open_position(state, plan, trade_id, deps.settings)
     if sink.is_taken(trade_id):
         register_taken(state, trade_id)
 

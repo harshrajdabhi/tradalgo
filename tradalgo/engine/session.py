@@ -13,14 +13,19 @@ from sqlalchemy import Engine, func, insert, select
 
 from tradalgo.clock import Clock, MarketCalendar, load_holidays, to_ist
 from tradalgo.config import Settings, load_leverage_overrides
-from tradalgo.data.base import INDEX_SYMBOL
-from tradalgo.engine.cycle import CycleDeps, SessionState, SymbolFrames, register_taken, run_cycle
+import pandas as pd
+
+from tradalgo.data.base import INDEX_SYMBOL, normalize
+from tradalgo.engine.cycle import (CycleDeps, SessionState, SymbolFrames, _cost_r, open_position, register_taken,
+                                   route_events, run_cycle)
 from tradalgo.notify.sender import enqueue_text_alert
 from tradalgo.notify.templates import eod_summary_message
 from tradalgo.notify.updates import process_updates
 from tradalgo.risk.limits import kill_switch_active, register_exit
+from tradalgo.risk.plan import TradePlan
+from tradalgo.strategies.base import Regime, Signal
 from tradalgo.storage import repo
-from tradalgo.storage.schema import alerts, health_events, paper_trades, shortlist, signals, user_actions
+from tradalgo.storage.schema import alerts, decisions, health_events, paper_trades, shortlist, signals, user_actions
 
 TZ = "Asia/Kolkata"
 CYCLE_START, CYCLE_END = time(9, 20), time(15, 30)
@@ -50,24 +55,6 @@ def shortlist_symbols(engine: Engine, trade_date: date) -> list[str]:
         ).order_by(shortlist.c.rank)).scalars())
 
 
-def route_events(state: SessionState, pm, events, settings: Settings, sink) -> None:
-    """Tick counterpart of cycle._manage_open_trades' event routing (that helper is bar-only)."""
-    still_open = {t.trade_id for t in pm.open_trades()}
-    for ev in events:
-        meta = state.trades[ev.trade_id]
-        meta["gross_r"] += float(ev.r_multiple) * ev.qty / meta["qty"]
-        taken = sink.is_taken(ev.trade_id)
-        if taken:
-            register_taken(state, ev.trade_id)
-        sink.emit_event(ev, taken)
-    for trade_id in sorted({ev.trade_id for ev in events} - still_open):
-        meta = state.trades[trade_id]
-        meta["closed"] = True
-        if trade_id in state.taken_trade_ids:
-            cost_r = settings.capital.fixed_cost_rupees / (meta["qty"] * meta["risk_per_share"])
-            state.risk = register_exit(state.risk, meta["symbol"], meta["gross_r"] - cost_r)
-
-
 class LiveSession:
     def __init__(self, settings: Settings, engine: Engine, clock: Clock, provider, cache,
                  sink_factory: Callable[[Callable[[], bool]], object],
@@ -89,6 +76,7 @@ class LiveSession:
         self._degraded = False
         self._subscribed: set[str] = set()
         self._finished = False
+        self._excursions: dict[int, tuple[float, float]] = {}
 
     def start(self, trade_date: date) -> bool:
         now = self.clock.now()
@@ -111,6 +99,8 @@ class LiveSession:
             setattr(self.deps, name, value)
         self.sink = self.sink_factory(lambda: self._degraded)
         self._finished = False
+        self._reconcile()
+        self._persist()
         if self.tick_stream_factory is not None:
             self.stream = self.tick_stream_factory(self.on_tick)
             self.stream.start()
@@ -128,18 +118,69 @@ class LiveSession:
 
     def _cycle(self, now: datetime) -> None:
         day = self.state.trade_date
+        yesterday = day - timedelta(days=1)
         start_5m, start_1d = day - timedelta(days=self.history_days_5m), day - timedelta(days=self.history_days_daily)
-        frames = {sym: SymbolFrames(self.cache.get(sym, "5m", start_5m, day), self.cache.get(sym, "1d", start_1d, day))
+
+        def five_minute(sym: str) -> pd.DataFrame:
+            # the cache never refetches a day it already holds, so today's growing bars bypass it (and stay unpersisted)
+            prior = self.cache.get(sym, "5m", start_5m, yesterday)
+            return normalize(pd.concat([prior, self.provider.get_candles(sym, "5m", day, day)]))
+
+        frames = {sym: SymbolFrames(five_minute(sym), self.cache.get(sym, "1d", start_1d, yesterday))
                   for sym in self.symbols}
-        index_5m = self.cache.get(INDEX_SYMBOL, "5m", start_5m, day)
+        index_5m = five_minute(INDEX_SYMBOL)
         self._track_degraded(now)
         ids, self._since_action_id = self.sink.newly_taken_trade_ids(self._since_action_id)
         for trade_id in ids:
             if trade_id in self.state.trades:
                 register_taken(self.state, trade_id, self.settings)
         run_cycle(self.state, now, frames, index_5m, self.deps, self.sink, check_kill_switch=True)
+        self._after_change()
+
+    def _after_change(self) -> None:
         self._persist()
+        self._write_excursions()
         self._sync_subscriptions()
+
+    def _write_excursions(self) -> None:
+        for pm in self.state.position_manager.values():
+            for t in pm.trades():
+                if self._excursions.get(t.trade_id) != (t.mfe_r, t.mae_r):
+                    self.sink.record_excursions(t.trade_id, t.mfe_r, t.mae_r)
+                    self._excursions[t.trade_id] = (t.mfe_r, t.mae_r)
+
+    def _reconcile(self) -> None:
+        """Adopt DB trades the saved state missed: a crash between a DB write and the state save."""
+        like = f"{self.state.trade_date.isoformat()}%"
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(paper_trades.c.id.label("trade_id"), paper_trades.c.qty, paper_trades.c.exit_ts,
+                       paper_trades.c.gross_r, signals.c.ts, signals.c.symbol, signals.c.strategy,
+                       signals.c.direction, signals.c.regime, signals.c.market_regime, signals.c.entry,
+                       signals.c.stop_loss, signals.c.target_2r, signals.c.target_3r, decisions.c.leverage_used,
+                       decisions.c.risk_rupees, decisions.c.est_cost, decisions.c.expected_value_r,
+                       decisions.c.room_to_target_r)
+                .join(signals, signals.c.id == paper_trades.c.signal_id)
+                .outerjoin(decisions, decisions.c.signal_id == signals.c.id)
+                .where(signals.c.mode == "live", paper_trades.c.entry_ts.like(like))
+                .order_by(paper_trades.c.id)).mappings().all()
+        st, s = self.state, self.settings
+        for r in rows:
+            trade_id = r["trade_id"]
+            if trade_id not in st.trades:
+                if r["exit_ts"] is None:
+                    open_position(st, _plan_from_row(r), trade_id, s)
+                    if self.sink.is_taken(trade_id):
+                        register_taken(st, trade_id, s)
+                continue
+            meta = st.trades[trade_id]
+            if r["exit_ts"] is not None and not meta["closed"]:
+                st.position_manager[meta["symbol"]].close(trade_id)
+                meta["gross_r"], meta["closed"] = r["gross_r"] or 0.0, True
+                if trade_id in st.taken_trade_ids:
+                    st.risk = register_exit(st.risk, meta["symbol"], meta["gross_r"] - _cost_r(s, meta))
+                elif self.sink.is_taken(trade_id):
+                    register_taken(st, trade_id, s)
 
     def _track_degraded(self, now: datetime) -> None:
         degraded = bool(getattr(self.provider, "degraded", False))
@@ -161,8 +202,7 @@ class LiveSession:
                 events = pm.on_price(to_ist(ts), ltp, ltp, ltp, False, open=ltp)
                 if events:
                     route_events(self.state, pm, events, self.settings, self.sink)
-                    self._persist()
-                    self._sync_subscriptions()
+                    self._after_change()
             except Exception as exc:
                 _health(self.engine, "session", "error", f"tick {symbol} failed: {exc!r}", self.clock.now())
 
@@ -177,9 +217,9 @@ class LiveSession:
                                    eod_summary_message(eod_stats(self.engine, day)), now)
             if self._job_id is not None:
                 repo.finish_job_run(self.engine, self._job_id, now)
-            if self.stream is not None:
-                self.stream.stop()
             self._finished = True
+        if self.stream is not None:
+            self.stream.stop()  # outside the lock: close_connection may wait on a socket thread blocked in on_tick
 
     def _persist(self) -> None:
         _write_atomic(state_path(self.state_dir, self.state.trade_date), json.dumps(self.state.to_dict()))
@@ -195,11 +235,25 @@ class LiveSession:
         self._subscribed = wanted
 
 
+def _plan_from_row(r) -> TradePlan:
+    signal = Signal(symbol=r["symbol"], strategy=r["strategy"], direction=r["direction"],
+                    ts=datetime.fromisoformat(r["ts"]), entry=r["entry"], stop_loss=r["stop_loss"],
+                    regime=Regime(r["regime"]), market_regime=Regime(r["market_regime"]), counter_trend=False,
+                    reason="recovered after restart", features={})
+    leverage = r["leverage_used"] or 1.0
+    return TradePlan(signal=signal, qty=r["qty"], leverage_used=leverage, margin_required=r["qty"] * r["entry"] / leverage,
+                     risk_rupees=r["risk_rupees"] or 0.0, target_2r=r["target_2r"], target_3r=r["target_3r"],
+                     est_cost=r["est_cost"] or 0.0, room_to_level_r=r["room_to_target_r"] or 0.0,
+                     expected_value_r=r["expected_value_r"] or 0.0, limit_low=r["entry"], limit_high=r["entry"],
+                     valid_until=datetime.fromisoformat(r["ts"]))
+
+
 def eod_stats(engine: Engine, day: date) -> dict:
     like = f"{day.isoformat()}%"
     with engine.connect() as conn:
         sent = conn.execute(select(func.count()).select_from(alerts).where(
-            alerts.c.created_at.like(like), alerts.c.alert_type.in_(("entry", "event")))).scalar()
+            alerts.c.created_at.like(like), alerts.c.alert_type.in_(("entry", "event")),
+            alerts.c.status.in_(("sent", "edited", "expired")))).scalar()
         actions = dict(conn.execute(select(user_actions.c.action, func.count()).where(
             user_actions.c.ts.like(like)).group_by(user_actions.c.action)).all())
         closed = conn.execute(

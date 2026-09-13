@@ -205,3 +205,33 @@ def test_partial_and_3r_same_bar():
     ev = pm.on_price(at(10, 10), 106.5, 99.0, 106.0, True)
     assert kinds(ev) == ["partial_exit", "trail_update", "runner_exit"]
     assert (ev[2].qty, ev[2].r_multiple) == (4, 3.0)
+
+
+def test_tick_just_after_bar_close_does_not_swallow_that_bar():
+    pm = PositionManager()
+    pm.open(1, plan())
+    assert pm.on_price(at(10, 10).replace(second=5), 99.0, 99.0, 99.0, False) == []
+    ev = pm.on_price(at(10, 10), 99.5, 97.0, 98.5, True, open=99.0)   # cycle at 10:10:10 sees the breaching bar
+    assert kinds(ev) == ["stop_hit"]
+    assert pm.on_price(at(10, 10).replace(second=20), 98.0, 98.0, 98.0, False) == []
+    assert pm.on_price(at(10, 10), 99.5, 97.0, 98.5, True) == []
+
+
+def test_trail_advances_with_ticks_between_bars():
+    pm = PositionManager(trail_bars=1)
+    pm.open(1, plan())
+    pm.on_price(at(10, 5), 104.0, 100.5, 103.0, True)                   # partial, stop -> 100
+    pm.on_price(at(10, 10).replace(second=3), 103.5, 103.5, 103.5, False)
+    ev = pm.on_price(at(10, 10), 104.5, 101.0, 104.0, True)
+    assert [e.new_stop for e in ev if e.kind == "trail_update"] == [101.0]
+
+
+def test_excursions_tracked_in_r_and_round_trip():
+    pm = PositionManager()
+    pm.open(1, plan())
+    pm.on_price(at(10, 5), 101.0, 99.0, 100.0, True)
+    pm.on_price(at(10, 6), 102.5, 102.5, 102.5, False)
+    t = pm.trades()[0]
+    assert (t.mfe_r, t.mae_r) == (pytest.approx(1.25), pytest.approx(-0.5))
+    back = PositionManager.from_dict(pm.to_dict())
+    assert back.trades()[0].mfe_r == pytest.approx(1.25)

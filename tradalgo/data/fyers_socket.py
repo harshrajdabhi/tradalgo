@@ -27,6 +27,7 @@ class TickStream:
         self._clock = clock or SystemClock()
         self._log_path = log_path or tempfile.gettempdir()
         self._symbols: set[str] = set()
+        self._last_ts: dict[str, datetime] = {}
         self._socket = None
         self._connected = False
 
@@ -65,8 +66,12 @@ class TickStream:
         if not isinstance(message, dict) or "ltp" not in message or "symbol" not in message:
             return
         feed_time = message.get("exch_feed_time") or message.get("last_traded_time")
+        symbol = from_fyers_symbol(message["symbol"])
         ts = datetime.fromtimestamp(int(feed_time), IST) if feed_time else self._clock.now()
-        self._on_tick(from_fyers_symbol(message["symbol"]), ts, float(message["ltp"]))
+        if symbol in self._last_ts and ts < self._last_ts[symbol]:
+            ts = self._clock.now()  # a stale snapshot time (e.g. pre-open last_traded_time) must not rewind
+        self._last_ts[symbol] = ts
+        self._on_tick(symbol, ts, float(message["ltp"]))
 
     def _error(self, message) -> None:
         self._on_status(f"error: {message}")

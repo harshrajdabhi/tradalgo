@@ -6,6 +6,7 @@ from sqlalchemy import insert
 
 from tradalgo.clock import MarketCalendar
 from tradalgo.data.base import INDEX_SYMBOL, normalize
+from tradalgo.data.candle_cache import CandleCache
 from tradalgo.storage.db import init_db, make_engine
 from tradalgo.storage.schema import shortlist
 from tests.backtest_fixtures import TODAY, at, bars, daily_trend, make_signal, rising_day, trading_weekdays
@@ -35,26 +36,30 @@ def frames(stop_bar: bool = False) -> dict:
 
 
 class FakeProvider:
+    """Serves the synthetic frames; `cutoff` hides today's bars starting at/after it, like a live feed."""
     name = "fake"
 
-    def __init__(self, degraded: bool = False):
-        self.degraded = degraded
-
-
-class FakeCache:
-    def __init__(self, frames: dict, provider: FakeProvider):
-        self.frames, self.provider = frames, provider
+    def __init__(self, frames: dict, degraded: bool = False):
+        self.frames, self.degraded = frames, degraded
         self.fail_next = False
+        self.cutoff: datetime | None = None
         self.calls = []
 
-    def get(self, symbol, resolution, start: date, end: date) -> pd.DataFrame:
+    def get_candles(self, symbol, resolution, start: date, end: date) -> pd.DataFrame:
         if self.fail_next:
             self.fail_next = False
             raise RuntimeError("boom")
         self.calls.append((symbol, resolution, start, end))
         df = self.frames[(symbol, resolution)]
         dates = df.index.date
-        return df[(dates >= start) & (dates <= end)]  # live data may run past `now`; the cycle slices
+        df = df[(dates >= start) & (dates <= end)]
+        if self.cutoff is not None:
+            df = df[(df.index.date < self.cutoff.date()) | (df.index < pd.Timestamp(self.cutoff))]
+        return df
+
+
+def make_cache(root, provider: FakeProvider) -> CandleCache:
+    return CandleCache(root / "candles", provider)
 
 
 def detector(extra: dict | None = None):

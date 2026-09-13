@@ -183,3 +183,25 @@ def test_classifier_gets_20_sessions_detectors_get_5(deps_for):
         pd.testing.assert_frame_equal(a15, b15)
         pd.testing.assert_frame_equal(a5, b5)
     pd.testing.assert_frame_equal(seen[20][1][0].candles_5m, seen[60][1][0].candles_5m)
+
+
+def test_shared_route_events_used_for_ticks_matches_bar_routing(deps_for):
+    from tradalgo.engine.cycle import route_events
+    sig = make_signal(ts=at(9, 35))
+    sink, st = Sink(taken=True), state()
+    deps = deps_for(detector({at(9, 40): [sig]}))
+    run_cycle(st, at(9, 40), frames(["AAA"], flat(5)), flat(5), deps, sink, check_kill_switch=False)
+    pm = st.position_manager["AAA"]
+    events = pm.on_price(at(9, 42), 98.9, 98.9, 98.9, False)
+    route_events(st, pm, events, deps.settings, sink)
+    assert [(e.kind, t) for e, t in sink.events] == [("stop_hit", True)]
+    assert st.trades[101]["closed"] and st.risk.open_trade_symbols == []
+    assert st.risk.realized_r == pytest.approx(-1.1 - 50 / (st.trades[101]["qty"] * 1.0))
+
+
+def test_open_position_registers_trade_and_seen_key(settings):
+    from tradalgo.engine.cycle import open_position
+    from tests.backtest_fixtures import make_plan
+    st = state()
+    open_position(st, make_plan(make_signal(ts=at(9, 35)), qty=10), 7, settings)
+    assert st.trades[7]["qty"] == 10 and len(st.position_manager["AAA"].open_trades()) == 1
