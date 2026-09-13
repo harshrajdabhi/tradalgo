@@ -70,6 +70,15 @@ def enqueue_backtest_run(engine: Engine, params: dict, now: datetime) -> int:
         )).inserted_primary_key[0]
 
 
+def claim_backtest_run(engine: Engine, run_id: int, now: datetime) -> bool:
+    """Atomically claims exactly this run (not the FIFO head); True iff it was queued and is now running."""
+    with engine.begin() as conn:
+        claimed = conn.execute(update(backtest_runs).where(
+            backtest_runs.c.id == run_id, backtest_runs.c.status == "queued",
+        ).values(status="running", started_at=_iso(now)))
+        return claimed.rowcount == 1
+
+
 def claim_next_backtest_run(engine: Engine, now: datetime) -> int | None:
     """Atomically moves the oldest queued run to 'running'; returns its id or None."""
     with engine.begin() as conn:

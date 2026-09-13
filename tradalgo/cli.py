@@ -3,10 +3,11 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 
 from tradalgo.clock import MarketCalendar, SystemClock, load_holidays, to_ist
 from tradalgo.config import KeyringStore, load_settings
@@ -26,6 +27,8 @@ from tradalgo.storage.schema import backtest_runs, health_events, shortlist
 clock_factory = SystemClock
 store_factory = KeyringStore
 run_subprocess = subprocess.run
+backtest_poll_sleep = time.sleep
+backtest_poll_seconds = 2
 
 
 def cmd_init(settings, args) -> int:
@@ -330,35 +333,61 @@ def cmd_backtest(settings, args) -> int:
         print(f"invalid backtest params: {exc}", file=sys.stderr)
         return 1
 
-    from tradalgo.storage.repo import claim_next_backtest_run, enqueue_backtest_run
+    from tradalgo.storage.repo import claim_backtest_run, enqueue_backtest_run
 
     run_id = enqueue_backtest_run(engine, params, now)
     print(f"queued backtest run {run_id}")
 
     universe = load_universe(settings.paths.static_dir)
-    while True:
-        claimed = claim_next_backtest_run(engine, clock.now())
-        if claimed is None:
-            break
-        print(f"processing backtest run {claimed}...")
-        status = process_run(settings, engine, clock, claimed, universe=universe)
-        print(f"run {claimed}: {status}")
-        if claimed == run_id:
-            break
+
+    if claim_backtest_run(engine, run_id, clock.now()):
+        print(f"processing backtest run {run_id}...")
+        try:
+            status = process_run(settings, engine, clock, run_id, universe=universe)
+        except KeyboardInterrupt:
+            interrupted_at = clock.now()
+            with engine.begin() as conn:
+                conn.execute(update(backtest_runs).where(backtest_runs.c.id == run_id).values(
+                    status="cancelled", error="interrupted by user", finished_at=to_ist(interrupted_at).isoformat()))
+            print(f"backtest run {run_id} interrupted by user; marked cancelled", file=sys.stderr)
+            return 130
+        print(f"run {run_id}: {status}")
+    else:
+        # A concurrent `tradalgo worker` claimed this run first; wait for it to finish rather than
+        # claiming and running someone else's queued backtest instead.
+        print(f"run {run_id} is being processed by the worker; waiting...")
+        last_progress = None
+        try:
+            while True:
+                with engine.connect() as conn:
+                    row = conn.execute(select(backtest_runs.c.status, backtest_runs.c.progress_pct)
+                                       .where(backtest_runs.c.id == run_id)).mappings().first()
+                if row["progress_pct"] != last_progress:
+                    print(f"progress: {row['progress_pct']}%")
+                    last_progress = row["progress_pct"]
+                if row["status"] in ("done", "failed", "cancelled"):
+                    break
+                backtest_poll_sleep(backtest_poll_seconds)
+        except KeyboardInterrupt:
+            print(f"stopped waiting on backtest run {run_id}; it keeps running in the worker", file=sys.stderr)
+            return 130
 
     with engine.connect() as conn:
         row = conn.execute(select(backtest_runs.c.status, backtest_runs.c.metrics_json, backtest_runs.c.error)
                            .where(backtest_runs.c.id == run_id)).mappings().first()
 
     if row["status"] != "done":
-        print(f"backtest failed: {row['error']}", file=sys.stderr)
+        print(f"backtest {row['status']}: {row['error'] or 'n/a'}", file=sys.stderr)
         return 1
+
+    def _fmt(value):
+        return "n/a" if value is None else value
 
     metrics = json.loads(row["metrics_json"])
     print(f"trades: {metrics['trades']}  win_rate: {metrics['win_rate']:.2%}  "
          f"expectancy_r: {metrics['expectancy_r']:.4f}  expectancy_r_no_slippage: {metrics['expectancy_r_no_slippage']:.4f}")
-    print(f"profit_factor: {metrics['profit_factor']}  max_drawdown_r: {metrics['max_drawdown_r']}  "
-         f"fill_rate: {metrics['fill_rate']}  missed_entries: {metrics['missed_entries']}")
+    print(f"profit_factor: {_fmt(metrics['profit_factor'])}  max_drawdown_r: {metrics['max_drawdown_r']}  "
+         f"fill_rate: {_fmt(metrics['fill_rate'])}  missed_entries: {metrics['missed_entries']}")
     print("by_strategy:")
     for name, s in metrics["by_strategy"].items():
         print(f"  {name}: trades={s['trades']} win_rate={s['win_rate']:.2%} expectancy_r={s['expectancy_r']:.4f}")
@@ -411,7 +440,12 @@ def cmd_worker(settings, args) -> int:
     last_maintenance_date = to_ist(clock.now()).date()
     try:
         while True:
-            run_worker(settings, engine, clock, once=True, telegram_client=telegram_client)
+            try:
+                run_worker(settings, engine, clock, once=True, telegram_client=telegram_client)
+            except Exception as exc:
+                _record_health_event(engine, clock.now(), "worker", f"run_worker failed: {exc}")
+                time_module.sleep(5)
+                continue
             safe_poll()
             today = to_ist(clock.now()).date()
             if today != last_maintenance_date:

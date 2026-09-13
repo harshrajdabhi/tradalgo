@@ -63,6 +63,25 @@ def test_backtest_claim_is_exclusive_and_fifo(engine):
     assert repo.claim_next_backtest_run(engine, NOW) is None
 
 
+def test_claim_backtest_run_claims_only_the_given_run(engine):
+    first = repo.enqueue_backtest_run(engine, {"from": "2025-09-01"}, NOW)
+    second = repo.enqueue_backtest_run(engine, {"from": "2026-01-01"}, NOW)
+
+    assert repo.claim_backtest_run(engine, second, NOW) is True
+    with engine.connect() as conn:
+        first_status = conn.execute(select(repo.backtest_runs.c.status)
+                                    .where(repo.backtest_runs.c.id == first)).scalar()
+        second_status = conn.execute(select(repo.backtest_runs.c.status)
+                                     .where(repo.backtest_runs.c.id == second)).scalar()
+    assert first_status == "queued"
+    assert second_status == "running"
+
+    # already running: a second claim attempt on the same run fails
+    assert repo.claim_backtest_run(engine, second, NOW) is False
+    # a run that doesn't exist also fails
+    assert repo.claim_backtest_run(engine, 999999, NOW) is False
+
+
 def test_naive_timestamps_rejected(engine):
     with pytest.raises(ValueError, match="naive"):
         repo.start_job_run(engine, "screen", datetime(2026, 9, 11, 9, 20))
