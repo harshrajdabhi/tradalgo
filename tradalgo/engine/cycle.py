@@ -14,7 +14,7 @@ from tradalgo.engine.positions import PositionManager
 from tradalgo.indicators.levels import key_levels, opening_range
 from tradalgo.risk.limits import (DailyRiskState, kill_switch_active, register_entry, register_exit,
                                   release_entry)
-from tradalgo.risk.costs import intraday_charges
+from tradalgo.risk.costs import intraday_charges, split_sides
 from tradalgo.risk.plan import Rejection, TradePlan
 from tradalgo.risk.validator import validate as validate_signal
 from tradalgo.strategies import registry
@@ -154,12 +154,12 @@ def _cost_r(settings: Settings, meta: dict) -> float:
     qty, entry = meta["qty"], meta.get("entry")
     if entry is None:  # a state saved before costs were modeled: no leg prices to price charges on
         return 0.0
-    exited = meta.get("exit_qty", 0)
-    # any qty not yet booked (a restored close) is priced at entry
-    exit_value = meta.get("exit_value", 0.0) + (qty - exited) * entry
-    orders = 1 + max(meta.get("exit_orders", 0), 1)
-    buy, sell = (entry * qty, exit_value) if meta.get("direction", "long") == "long" else (exit_value, entry * qty)
-    return intraday_charges(buy, sell, settings.costs, orders) / (qty * meta["risk_per_share"])
+    exits = list(meta.get("exit_orders", []))
+    unbooked = qty - meta.get("exit_qty", 0)
+    if unbooked > 0:  # a restored close without its legs: price the rest at entry as one order
+        exits.append(unbooked * entry)
+    sides = split_sides(meta.get("direction", "long"), entry * qty, exits)
+    return intraday_charges(*sides, settings.costs) / (qty * meta["risk_per_share"])
 
 
 def reserve_slot(state: SessionState, trade_id: int) -> None:
@@ -230,9 +230,8 @@ def route_events(state: SessionState, pm: PositionManager, events: list[Position
         meta = state.trades[ev.trade_id]
         meta["gross_r"] += float(ev.r_multiple) * ev.qty / meta["qty"]
         if ev.qty:
-            meta["exit_value"] = meta.get("exit_value", 0.0) + float(ev.price) * ev.qty
+            meta["exit_orders"] = [*meta.get("exit_orders", []), float(ev.price) * ev.qty]
             meta["exit_qty"] = meta.get("exit_qty", 0) + ev.qty
-            meta["exit_orders"] = meta.get("exit_orders", 0) + 1
         taken = sink.is_taken(ev.trade_id)
         if taken:
             register_taken(state, ev.trade_id)

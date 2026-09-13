@@ -21,6 +21,7 @@ def sig(direction="long", entry=100.0, stop=98.0, symbol="SBIN", strategy="orb")
 
 
 def run(signal, capital=20000.0, symbol_leverage=None, levels=(), state=None, **kw):
+    kw.setdefault("costs_cfg", CostsConfig())
     return validate(signal, capital=capital, capital_cfg=CFG, symbol_leverage=symbol_leverage,
                     levels=list(levels), limits_state=state or DailyRiskState(date(2026, 9, 11)), **kw)
 
@@ -88,6 +89,11 @@ def test_band_fill_risk_never_exceeds_cap():
         assert isinstance(p, TradePlan)
         for fill in (p.limit_low, p.limit_high):
             assert p.qty * abs(fill - stop) <= 20000 * 0.03 + 1e-9
+
+
+def test_real_charges_on_small_trade_are_a_small_cost_r():
+    p = run(sig(entry=100.0, stop=99.0), capital=1000.0)
+    assert isinstance(p, TradePlan) and p.est_cost / (p.qty * 1.0) < 0.2
 
 
 def test_ev_uses_partial_and_runner_weights():

@@ -166,6 +166,18 @@ same guard, same code path as the local `session`/`worker`.
    trust an alert enough to act on it manually is the M6 gate (`tradalgo backtest ...`) plus a clean shadow
    run, not a switch from paper to Actions or Actions to local.
 
+## Trading costs
+
+Backtest and paper-trade net R subtract modeled FYERS equity-intraday charges from `config.yaml` `costs:`. These replace the old flat ₹50 per trade. The charges are:
+- brokerage per executed order, capped per order;
+- STT on the sell side;
+- exchange transaction charges;
+- SEBI fees;
+- stamp duty on the buy side;
+- GST on brokerage, exchange charges and SEBI fees.
+
+Verify the rates against https://fyers.in/charges before you trust backtest results.
+
 ## Before relying on live alerts
 
 - Verify `data_static/nse_holidays_2026.yaml` (and the current year's file) against the official NSE

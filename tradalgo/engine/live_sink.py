@@ -13,7 +13,7 @@ from tradalgo.clock import Clock, to_ist
 from tradalgo.config import CostsConfig
 from tradalgo.engine.events import PositionEvent
 from tradalgo.notify.sender import enqueue_entry_alert, enqueue_event_alert
-from tradalgo.risk.costs import intraday_charges
+from tradalgo.risk.costs import intraday_charges, split_sides
 from tradalgo.risk.plan import TradePlan
 from tradalgo.storage.schema import alerts, decisions, paper_trades, signals, user_actions
 
@@ -117,10 +117,9 @@ class LiveSink:
 
     def _charges(self, t, event: PositionEvent) -> float:
         partial_qty = t["qty"] - event.qty if t["partial_exit_price"] is not None and event.kind != "partial_exit" else 0
-        exit_value = partial_qty * t["partial_exit_price"] + event.qty * event.price if partial_qty else t["qty"] * event.price
-        entry_value = t["qty"] * t["entry"]
-        buy, sell = (entry_value, exit_value) if t["direction"] == "long" else (exit_value, entry_value)
-        return intraday_charges(buy, sell, self.costs, 3 if partial_qty else 2)
+        exits = [partial_qty * t["partial_exit_price"], event.qty * event.price] if partial_qty \
+            else [t["qty"] * event.price]
+        return intraday_charges(*split_sides(t["direction"], t["qty"] * t["entry"], exits), self.costs)
 
     def record_excursions(self, trade_id: int, mfe_r: float, mae_r: float) -> None:
         with self.engine.begin() as conn:

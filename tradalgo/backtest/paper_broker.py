@@ -8,7 +8,7 @@ from datetime import datetime
 
 from tradalgo.config import CostsConfig
 from tradalgo.engine.events import PositionEvent
-from tradalgo.risk.costs import intraday_charges
+from tradalgo.risk.costs import intraday_charges, split_sides
 from tradalgo.risk.plan import TradePlan
 
 
@@ -76,11 +76,10 @@ class PaperBroker:
         gross_pnl = sum(sign * (leg["price"] - t["fill"]) * leg["qty"] for leg in t["legs"])
         slipped_pnl = sum(sign * (px - entry_slipped) * leg["qty"] for px, leg in zip(exits_slipped, t["legs"]))
         unit = plan.qty * sig.risk_per_share
-        orders = 1 + len(t["legs"])
-        net_rupees = slipped_pnl - self._charges(sign, entry_slipped * plan.qty,
-                                                 sum(px * leg["qty"] for px, leg in zip(exits_slipped, t["legs"])), orders)
-        charges_no_slip = self._charges(sign, t["fill"] * plan.qty,
-                                        sum(leg["price"] * leg["qty"] for leg in t["legs"]), orders)
+        net_rupees = slipped_pnl - self._charges(sig.direction, entry_slipped * plan.qty,
+                                                 [px * leg["qty"] for px, leg in zip(exits_slipped, t["legs"])])
+        charges_no_slip = self._charges(sig.direction, t["fill"] * plan.qty,
+                                        [leg["price"] * leg["qty"] for leg in t["legs"]])
         return {
             "signal_id": t["signal_id"], "trade_date": sig.ts.date(), "symbol": sig.symbol,
             "strategy": sig.strategy, "direction": sig.direction, "regime": sig.regime.value,
@@ -97,6 +96,5 @@ class PaperBroker:
             "legs": t["legs"],
         }
 
-    def _charges(self, sign: int, entry_value: float, exit_value: float, orders: int) -> float:
-        buy, sell = (entry_value, exit_value) if sign == 1 else (exit_value, entry_value)
-        return intraday_charges(buy, sell, self.costs, orders)
+    def _charges(self, direction: str, entry_value: float, exit_values: list[float]) -> float:
+        return intraday_charges(*split_sides(direction, entry_value, exit_values), self.costs)

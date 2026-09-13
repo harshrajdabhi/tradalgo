@@ -106,7 +106,7 @@ def test_kill_switch_blocks_entries_but_manages_open_trades(deps_for, tmp_path):
     assert [s.symbol for s in sink.signals] == ["AAA"]
     assert [(e.kind, e.ts) for e, _ in sink.events] == [("stop_hit", at(9, 45))]
     m = st.trades[101]
-    charges = intraday_charges(m["entry"] * m["qty"], (m["entry"] - 1.0) * m["qty"], deps.settings.costs)
+    charges = intraday_charges([m["entry"] * m["qty"]], [(m["entry"] - 1.0) * m["qty"]], deps.settings.costs)
     assert st.risk.realized_r == pytest.approx(-1.0 - charges / (m["qty"] * 1.0))
 
 
@@ -202,7 +202,7 @@ def test_shared_route_events_used_for_ticks_matches_bar_routing(deps_for):
     assert [(e.kind, t) for e, t in sink.events] == [("stop_hit", True)]
     assert st.trades[101]["closed"] and st.risk.open_trade_symbols == []
     m = st.trades[101]
-    charges = intraday_charges(m["entry"] * m["qty"], (m["entry"] - 1.1) * m["qty"], deps.settings.costs)
+    charges = intraday_charges([m["entry"] * m["qty"]], [(m["entry"] - 1.1) * m["qty"]], deps.settings.costs)
     assert st.risk.realized_r == pytest.approx(-1.1 - charges / (m["qty"] * 1.0))
 
 

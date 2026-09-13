@@ -314,7 +314,7 @@ def cmd_session(settings, args) -> int:
     tick_stream_factory = build_tick_stream_factory(settings, store, trade_date, on_fallback)
 
     def sink_factory(degraded_fn):
-        return LiveSink(engine, clock, degraded_fn, settings.telegram.enabled)
+        return LiveSink(engine, clock, degraded_fn, settings.telegram.enabled, costs=settings.costs)
 
     session = LiveSession(settings, engine, clock, provider, cache, sink_factory,
                           tick_stream_factory=tick_stream_factory,
@@ -361,7 +361,7 @@ def cmd_ci_cycle(settings, args) -> int:
     cache = CandleCache(data_dir / "candles", provider)
 
     def sink_factory(degraded_fn):
-        return LiveSink(engine, clock, degraded_fn, settings.telegram.enabled)
+        return LiveSink(engine, clock, degraded_fn, settings.telegram.enabled, costs=settings.costs)
 
     session = LiveSession(settings, engine, clock, provider, cache, sink_factory,
                           tick_stream_factory=None, state_dir=data_dir / "session")

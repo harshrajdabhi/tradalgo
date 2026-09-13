@@ -1,4 +1,6 @@
 """Modeled FYERS equity-intraday charges in rupees. Rates live in config `costs:`; verify them against fyers.in/charges."""
+from collections.abc import Sequence
+
 from tradalgo.config import CostsConfig
 
 CRORE = 1e7
@@ -8,21 +10,23 @@ def order_brokerage(value: float, cfg: CostsConfig) -> float:
     return min(cfg.brokerage_pct_per_order * value, cfg.brokerage_cap_per_order)
 
 
-def intraday_charges(buy_value: float, sell_value: float, cfg: CostsConfig, orders: int = 2) -> float:
-    turnover = buy_value + sell_value
-    # turnover is split evenly across the executed orders; a partial exit is one extra sell order
-    brokerage = orders * order_brokerage(turnover / orders, cfg) if orders else 0.0
+def intraday_charges(buy_orders: Sequence[float], sell_orders: Sequence[float], cfg: CostsConfig) -> float:
+    """Each list holds the rupee value of every executed order on that side (a partial exit is its own order)."""
+    buy, sell = sum(buy_orders), sum(sell_orders)
+    turnover = buy + sell
+    brokerage = sum(order_brokerage(v, cfg) for v in (*buy_orders, *sell_orders))
     exchange = cfg.exchange_txn_pct * turnover
     sebi = cfg.sebi_per_crore * turnover / CRORE
     ipft = cfg.ipft_per_crore * turnover / CRORE
-    stt = cfg.stt_sell_pct * sell_value
-    stamp = cfg.stamp_buy_pct * buy_value
-    return brokerage + exchange + sebi + ipft + stt + stamp + cfg.gst_pct * (brokerage + exchange + sebi)
+    return (brokerage + exchange + sebi + ipft + cfg.stt_sell_pct * sell + cfg.stamp_buy_pct * buy
+            + cfg.gst_pct * (brokerage + exchange + sebi))
+
+
+def split_sides(direction: str, entry_value: float, exit_values: Sequence[float]) -> tuple[list[float], list[float]]:
+    return ([entry_value], list(exit_values)) if direction == "long" else (list(exit_values), [entry_value])
 
 
 def estimate_round_trip(entry: float, qty: int, direction: str, cfg: CostsConfig,
                         target_price: float | None = None) -> float:
-    entry_value = entry * qty
-    exit_value = (entry if target_price is None else target_price) * qty
-    buy, sell = (entry_value, exit_value) if direction == "long" else (exit_value, entry_value)
-    return intraday_charges(buy, sell, cfg)
+    exit_price = entry if target_price is None else target_price
+    return intraday_charges(*split_sides(direction, entry * qty, [exit_price * qty]), cfg)

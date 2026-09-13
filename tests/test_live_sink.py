@@ -20,7 +20,7 @@ def engine(tmp_path):
 
 
 def sink(engine, degraded=False, alerts_enabled=True):
-    return LiveSink(engine, FixedClock(at(9, 40)), lambda: degraded, alerts_enabled)
+    return LiveSink(engine, FixedClock(at(9, 40)), lambda: degraded, alerts_enabled, CostsConfig())
 
 
 def rows(engine, table):
@@ -98,7 +98,7 @@ def test_events_update_trade_and_alert_only_when_taken(engine):
     assert t["exit_reason"] == "runner_exit" and t["exit_price"] == 103.0
     assert t["exit_ts"] == datetime(2026, 9, 15, 10, 30, tzinfo=IST).isoformat()
     assert t["gross_r"] == pytest.approx(0.6 * 2 + 0.4 * 3)
-    charges = intraday_charges(100.0 * 100, 102.0 * 60 + 103.0 * 40, CostsConfig(), orders=3)
+    charges = intraday_charges([100.0 * 100], [102.0 * 60, 103.0 * 40], CostsConfig())
     assert t["net_r"] == pytest.approx(2.4 - charges / 100)
     assert [a["alert_type"] for a in rows(engine, alerts)] == ["entry", "event"]
 
@@ -112,7 +112,7 @@ def test_single_qty_partial_closes_trade(engine):
     s.flush_event_alerts()
     t = rows(engine, paper_trades)[0]
     assert t["exit_reason"] == "partial_exit" and t["net_r"] == pytest.approx(
-        2.0 - intraday_charges(100.0, 102.0, CostsConfig()) / 1)
+        2.0 - intraday_charges([100.0], [102.0], CostsConfig()) / 1)
 
 
 def test_recording_is_idempotent_against_the_db(engine):

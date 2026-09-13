@@ -1,5 +1,6 @@
 """Offline tests for the session/backtest/worker/report CLI commands: no network, no keychain, no Telegram."""
 import json
+from argparse import Namespace
 from datetime import date, datetime
 
 import yaml
@@ -307,3 +308,36 @@ def test_report_prints_text_and_enqueues_one_alert_with_telegram(tmp_path, raw_c
     with engine.connect() as conn:
         count = conn.execute(select(alerts.c.id).where(alerts.c.alert_type == "report")).all()
     assert len(count) == 1  # dedup key collapses the second call into a no-op
+
+
+# ---------- live sink receives configured costs ----------
+
+def _capture_sink(monkeypatch, start_ok):
+    import tradalgo.engine.session as session_mod
+    captured = {}
+
+    class FakeSession:
+        def __init__(self, settings, engine, clock, provider, cache, sink_factory, **kw):
+            captured["sink"] = sink_factory(lambda: False)
+
+        def start(self, trade_date):
+            return start_ok
+
+    monkeypatch.setattr(session_mod, "LiveSession", FakeSession)
+    monkeypatch.setattr(session_mod, "shortlist_symbols", lambda engine, d: ["SBIN"])
+    monkeypatch.setattr(session_mod, "run_session", lambda *a, **k: True)
+    monkeypatch.setattr(cli, "build_screen_provider", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "build_tick_stream_factory", lambda *a, **k: None)
+    return captured
+
+
+def test_session_and_ci_cycle_live_sink_get_settings_costs(tmp_path, raw_config, monkeypatch):
+    raw_config["costs"] = {"brokerage_cap_per_order": 7.0}
+    cfg_path, settings, engine = _setup(tmp_path, raw_config, monkeypatch,
+                                        now=datetime(2026, 9, 15, 10, 0, tzinfo=IST))
+    captured = _capture_sink(monkeypatch, start_ok=True)
+    assert cli.cmd_session(settings, Namespace(date="2026-09-15")) == 0
+    assert captured.pop("sink").costs.brokerage_cap_per_order == 7.0
+    captured = _capture_sink(monkeypatch, start_ok=False)
+    assert cli.cmd_ci_cycle(settings, Namespace(date="2026-09-15")) == 0
+    assert captured["sink"].costs.brokerage_cap_per_order == 7.0

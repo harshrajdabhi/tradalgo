@@ -41,12 +41,12 @@ def test_slippage_and_modeled_charges_arithmetic(plan):
     rec = _stop_exit(broker, plan, stop_price=100.0)
     assert rec["exit_reason"] == "stop_hit"
     assert rec["gross_r"] == pytest.approx(-1.05)            # (99 - 100.05) * 100 / (100 * 1)
-    raw_charges = intraday_charges(100.05 * 100, 99 * 100, COSTS)
+    raw_charges = intraday_charges([100.05 * 100], [99 * 100], COSTS)
     assert rec["net_r_no_slippage"] == pytest.approx(-1.05 - raw_charges / 100)
     # entry 100.05 * 1.001 = 100.15005; exit 99 * 0.999 = 98.901
     assert rec["entry_price"] == pytest.approx(100.15005)
     assert rec["exit_price"] == pytest.approx(98.901)
-    charges = intraday_charges(100.15005 * 100, 98.901 * 100, COSTS)
+    charges = intraday_charges([100.15005 * 100], [98.901 * 100], COSTS)
     assert charges == pytest.approx(10.047, abs=0.01)
     assert rec["net_rupees"] == pytest.approx(-124.905 - charges)
     assert rec["net_r"] == pytest.approx((-124.905 - charges) / 100)
@@ -73,7 +73,7 @@ def test_partial_and_runner_legs(plan):
         rec = broker.on_event(ev) or rec
     assert [leg["kind"] for leg in rec["legs"]] == ["partial_exit", "runner_exit"]
     assert rec["gross_r"] == pytest.approx(0.6 * 2 + 0.4 * 3)
-    charges = intraday_charges(100.0 * 100, 102.0 * 60 + 103.0 * 40, COSTS, orders=3)
+    charges = intraday_charges([100.0 * 100], [102.0 * 60, 103.0 * 40], COSTS)
     assert rec["net_r"] == pytest.approx(2.4 - charges / 100)
 
 

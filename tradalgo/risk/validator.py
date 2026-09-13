@@ -15,6 +15,7 @@ def validate(
     *,
     capital: float,
     capital_cfg: CapitalConfig,
+    costs_cfg: CostsConfig,
     symbol_leverage: float | None,
     levels: list[float],
     limits_state: DailyRiskState,
@@ -23,7 +24,6 @@ def validate(
     min_room_r: float = 2.0,
     partial_fraction: float = 0.6,
     band_fraction_r: float = 0.1,
-    costs_cfg: CostsConfig | None = None,
 ) -> TradePlan | Rejection:
     reason = check_limits(limits_state, signal, capital_cfg.max_trades_per_day, capital_cfg.daily_loss_limit_r)
     if reason:
@@ -49,7 +49,7 @@ def validate(
     else:
         room_r = NO_LEVEL_ROOM_R
 
-    est_cost = estimate_round_trip(worst, qty, signal.direction, costs_cfg or CostsConfig())
+    est_cost = estimate_round_trip(worst, qty, signal.direction, costs_cfg)
     risk_rupees = qty * abs(worst - signal.stop_loss)
     cost_r = est_cost / (qty * rps)
     ev = win_prob * (partial_fraction * 2 + (1 - partial_fraction) * runner_avg_r) - (1 - win_prob) - cost_r
