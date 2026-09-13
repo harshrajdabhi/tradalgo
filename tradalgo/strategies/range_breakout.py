@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 from tradalgo.strategies.base import MarketContext, Signal
-from tradalgo.strategies.common import bounded_stop, last_atr, last_rvol, make_signal, today_bars
+from tradalgo.strategies.common import bounded_stop, last_atr, last_rvol, make_signal, today_bars, tunable_defaults
 
 
 @dataclass(frozen=True)
@@ -62,3 +62,4 @@ class RangeBreakoutDetector:
 
 
 range_breakout = RangeBreakoutDetector()
+DEFAULTS: dict = tunable_defaults(RangeBreakoutDetector)

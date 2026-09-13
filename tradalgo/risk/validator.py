@@ -24,6 +24,8 @@ def validate(
     min_room_r: float = 2.0,
     partial_fraction: float = 0.6,
     band_fraction_r: float = 0.1,
+    partial_at_r: float = 2.0,
+    runner_target_r: float = 3.0,
 ) -> TradePlan | Rejection:
     reason = check_limits(limits_state, signal, capital_cfg.max_trades_per_day, capital_cfg.daily_loss_limit_r)
     if reason:
@@ -52,7 +54,7 @@ def validate(
     est_cost = estimate_round_trip(worst, qty, signal.direction, costs_cfg)
     risk_rupees = qty * abs(worst - signal.stop_loss)
     cost_r = est_cost / (qty * rps)
-    ev = win_prob * (partial_fraction * 2 + (1 - partial_fraction) * runner_avg_r) - (1 - win_prob) - cost_r
+    ev = win_prob * (partial_fraction * partial_at_r + (1 - partial_fraction) * runner_avg_r) - (1 - win_prob) - cost_r
     if ev <= 0:
         return Rejection(signal, f"expected value {ev:.3f}R <= 0 after costs (cost {cost_r:.3f}R)")
 
@@ -62,8 +64,8 @@ def validate(
         leverage_used=leverage,
         margin_required=margin_required(qty, worst, leverage),
         risk_rupees=risk_rupees,
-        target_2r=signal.target(2),
-        target_3r=signal.target(3),
+        target_2r=signal.target(partial_at_r),
+        target_3r=signal.target(runner_target_r),
         est_cost=est_cost,
         room_to_level_r=room_r,
         expected_value_r=ev,

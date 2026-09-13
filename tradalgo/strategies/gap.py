@@ -5,7 +5,7 @@ import pandas as pd
 
 from tradalgo.indicators import opening_range, prev_day_hlc
 from tradalgo.strategies.base import MarketContext, Signal
-from tradalgo.strategies.common import SESSION_OPEN, bounded_stop, last_atr, make_signal, today_bars
+from tradalgo.strategies.common import SESSION_OPEN, bounded_stop, last_atr, make_signal, today_bars, tunable_defaults
 
 
 @dataclass(frozen=True)
@@ -68,3 +68,4 @@ class GapDetector:
 
 
 gap = GapDetector()
+DEFAULTS: dict = tunable_defaults(GapDetector)

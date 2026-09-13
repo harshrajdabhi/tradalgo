@@ -1,5 +1,6 @@
 """Helpers shared by all detectors."""
 import math
+from dataclasses import fields
 from datetime import time
 
 import pandas as pd
@@ -9,6 +10,13 @@ from tradalgo.indicators import atr, intraday_relative_volume
 from tradalgo.strategies.base import Direction, MarketContext, Signal
 
 SESSION_OPEN = time(9, 15)
+# identity fields, plus stop bounds that come from position_management for every detector
+NOT_TUNABLE = {"name", "counter_trend", "min_stop_atr", "max_stop_atr"}
+
+
+def tunable_defaults(detector_cls) -> dict:
+    """The detector's per-strategy tunables (config `strategies.<name>.params`) with their defaults."""
+    return {f.name: f.default for f in fields(detector_cls) if f.name not in NOT_TUNABLE}
 
 
 def today_bars(ctx: MarketContext) -> pd.DataFrame | None:

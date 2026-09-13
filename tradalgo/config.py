@@ -74,12 +74,37 @@ class StrategyConfig(BaseModel):
     enabled: bool
     window_start: time
     window_end: time
+    # detector tunables; keys/types are checked against the detector module's DEFAULTS
+    params: dict[str, float | int | bool] = {}
 
 
 class PositionConfig(BaseModel):
-    # PositionManager partials at the plan's 2R target and trails on the last risk.trail_bars extreme;
-    # neither is configurable, so no knob for them is offered here.
+    # the trail length lives in risk.trail_bars
     partial_exit_fraction: float = Field(gt=0, lt=1)
+    partial_exit_at_r: float = Field(default=2.0, gt=0)
+    breakeven_after_partial: bool = True
+    runner_target_r: float = Field(default=3.0, gt=0)
+    stop_atr_min: float = Field(default=0.5, gt=0)
+    stop_atr_max: float = Field(default=2.0, gt=0)
+
+    @model_validator(mode="after")
+    def _check_order(self):
+        if self.runner_target_r <= self.partial_exit_at_r:
+            raise ValueError("runner_target_r must be greater than partial_exit_at_r")
+        if self.stop_atr_min >= self.stop_atr_max:
+            raise ValueError("stop_atr_min must be less than stop_atr_max")
+        return self
+
+
+class RegimeConfig(BaseModel):
+    adx_trend: float = Field(default=25.0, gt=0)
+    high_vol_pct: float = Field(default=90.0, ge=0, le=100)
+    range_mult: float = Field(default=1.5, gt=0)
+    range_lookback_sessions: int = Field(default=10, ge=1)
+    vol_lookback_sessions: int = Field(default=20, ge=1)
+    adx_period: int = Field(default=14, ge=1)
+    ema_period: int = Field(default=20, ge=1)
+    min_bars: int = Field(default=40, ge=1)
 
 
 class BacktestConfig(BaseModel):
@@ -140,6 +165,7 @@ class Settings(BaseModel):
     backtest: BacktestConfig
     costs: CostsConfig = CostsConfig()
     risk: RiskTuning = RiskTuning()
+    regime: RegimeConfig = RegimeConfig()
     preopen: PreopenConfig = PreopenConfig()
     telegram: TelegramConfig = TelegramConfig()
     dashboard: DashboardConfig = DashboardConfig()
@@ -152,7 +178,29 @@ class Settings(BaseModel):
         for name, s in self.strategies.items():
             if not (self.market.open <= s.window_start < s.window_end <= self.market.no_new_entries_after):
                 raise ValueError(f"strategy {name}: window must lie within open..no_new_entries_after")
+        from tradalgo.strategies.registry import check_params  # the registry imports this module
+        for name, s in self.strategies.items():
+            s.params = check_params(name, s.params)
         return self
+
+
+def _merge(base: dict, overrides: dict, path: str) -> dict:
+    out = dict(base)
+    for key, value in overrides.items():
+        where = f"{path}.{key}" if path else key
+        # a params dict may gain keys (checked by the strategy validator); anywhere else a new key is a typo
+        if key not in base and not path.endswith("params"):
+            raise ValueError(f"unknown settings key {where!r}")
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            out[key] = _merge(base[key], value, where)
+        else:
+            out[key] = value
+    return out
+
+
+def settings_with_overrides(settings: Settings, overrides: dict) -> Settings:
+    """A fully re-validated copy of settings with a nested override dict applied; the original is untouched."""
+    return Settings.model_validate(_merge(settings.model_dump(), overrides, ""))
 
 
 def load_settings(path: str | Path = "config.yaml") -> Settings:

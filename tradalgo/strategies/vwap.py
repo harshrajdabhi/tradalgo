@@ -5,7 +5,7 @@ import numpy as np
 
 from tradalgo.indicators import session_vwap
 from tradalgo.strategies.base import MarketContext, Regime, Signal
-from tradalgo.strategies.common import bounded_stop, last_atr, make_signal, today_bars
+from tradalgo.strategies.common import bounded_stop, last_atr, make_signal, today_bars, tunable_defaults
 
 
 @dataclass(frozen=True)
@@ -90,3 +90,4 @@ class VwapDetector:
 
 
 vwap = VwapDetector()
+DEFAULTS: dict = tunable_defaults(VwapDetector)

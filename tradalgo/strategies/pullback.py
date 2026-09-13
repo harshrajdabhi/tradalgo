@@ -5,7 +5,7 @@ import numpy as np
 
 from tradalgo.indicators import ema
 from tradalgo.strategies.base import MarketContext, Signal
-from tradalgo.strategies.common import bounded_stop, last_atr, make_signal, today_bars
+from tradalgo.strategies.common import bounded_stop, last_atr, make_signal, today_bars, tunable_defaults
 
 
 @dataclass(frozen=True)
@@ -69,3 +69,4 @@ class PullbackDetector:
 
 
 pullback = PullbackDetector()
+DEFAULTS: dict = tunable_defaults(PullbackDetector)

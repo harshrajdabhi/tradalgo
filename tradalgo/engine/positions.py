@@ -59,10 +59,14 @@ class PositionManager:
     stop and partial status in effect at its start; ticks use the current state. Replays are idempotent.
     """
 
-    def __init__(self, partial_fraction: float = 0.6, trail_bars: int = 3, hard_exit: time = time(15, 0)):
+    def __init__(self, partial_fraction: float = 0.6, trail_bars: int = 3, hard_exit: time = time(15, 0),
+                 partial_at_r: float = 2.0, runner_target_r: float = 3.0, breakeven_after_partial: bool = True):
         self.partial_fraction = partial_fraction
         self.trail_bars = trail_bars
         self.hard_exit = hard_exit
+        self.partial_at_r = partial_at_r
+        self.runner_target_r = runner_target_r
+        self.breakeven_after_partial = breakeven_after_partial
         self._trades: dict[int, ManagedTrade] = {}
 
     def open(self, trade_id: int, plan: TradePlan, filled_price: float | None = None) -> None:
@@ -87,7 +91,8 @@ class PositionManager:
             return
         t.partial_done = True
         t.remaining = max(1, t.qty - max(1, math.floor(t.qty * self.partial_fraction)))
-        self._tighten(t, t.entry)
+        if self.breakeven_after_partial:
+            self._tighten(t, t.entry)
 
     def close(self, trade_id: int) -> None:
         """Crash recovery: the exit was already recorded elsewhere, stop managing without emitting."""
@@ -148,18 +153,19 @@ class PositionManager:
         events = []
         partial_now = False
         # a partial already emitted by a tick inside this bar is not repeated (t.partial_done)
-        if not t.partial_done and self._touches(t, t.target_2r, high, low, favorable=True):
+        partial_level, runner_level = self._level(t, self.partial_at_r), self._level(t, self.runner_target_r)
+        if not t.partial_done and self._touches(t, partial_level, high, low, favorable=True):
             t.partial_done = partial_now = True
             if t.remaining == 1:
-                return [self._exit(t, "partial_exit", ts, t.target_2r)]
+                return [self._exit(t, "partial_exit", ts, partial_level)]
             qty = max(1, math.floor(t.qty * self.partial_fraction))
-            events.append(self._event(t, "partial_exit", ts, t.target_2r, qty))
+            events.append(self._event(t, "partial_exit", ts, partial_level, qty))
             t.remaining -= qty
-            if self._tighten(t, t.entry):
-                events.append(self._event(t, "trail_update", ts, t.target_2r, 0, t.stop))
+            if self.breakeven_after_partial and self._tighten(t, t.entry):
+                events.append(self._event(t, "trail_update", ts, partial_level, 0, t.stop))
 
-        if (eff_partial or partial_now) and t.partial_done and self._touches(t, t.target_3r, high, low, favorable=True):
-            return events + [self._exit(t, "runner_exit", ts, t.target_3r)]
+        if (eff_partial or partial_now) and t.partial_done and self._touches(t, runner_level, high, low, favorable=True):
+            return events + [self._exit(t, "runner_exit", ts, runner_level)]
 
         if bar_closed:
             t.closed_highs = (t.closed_highs + [high])[-self.trail_bars:]
@@ -172,6 +178,11 @@ class PositionManager:
         if ts.astimezone(IST).time() >= self.hard_exit:
             events.append(self._exit(t, "hard_exit", ts, close))
         return events
+
+    @staticmethod
+    def _level(t: ManagedTrade, r: float) -> float:
+        # same arithmetic as Signal.target, so the default 2R/3R levels equal the plan's targets exactly
+        return t.entry + (1 if t.long else -1) * r * t.risk_per_share
 
     def _tighten(self, t: ManagedTrade, candidate: float) -> bool:
         new = max(t.stop, candidate) if t.long else min(t.stop, candidate)
@@ -186,12 +197,16 @@ class PositionManager:
             "partial_fraction": self.partial_fraction,
             "trail_bars": self.trail_bars,
             "hard_exit": self.hard_exit.isoformat(),
+            "partial_at_r": self.partial_at_r,
+            "runner_target_r": self.runner_target_r,
+            "breakeven_after_partial": self.breakeven_after_partial,
             "trades": [asdict(t) for t in self._trades.values()],
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "PositionManager":
-        pm = cls(d["partial_fraction"], d["trail_bars"], time.fromisoformat(d["hard_exit"]))
+        pm = cls(d["partial_fraction"], d["trail_bars"], time.fromisoformat(d["hard_exit"]),
+                 d.get("partial_at_r", 2.0), d.get("runner_target_r", 3.0), d.get("breakeven_after_partial", True))
         known = set(ManagedTrade.__dataclass_fields__)
         for td in d["trades"]:
             td = {k: v for k, v in td.items() if k in known}  # drops the pre-split last_ts/last_closed cursor

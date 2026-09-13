@@ -5,7 +5,8 @@ import pandas as pd
 
 from tradalgo.indicators import opening_range
 from tradalgo.strategies.base import MarketContext, Signal
-from tradalgo.strategies.common import SESSION_OPEN, bounded_stop, last_atr, last_rvol, make_signal, today_bars
+from tradalgo.strategies.common import (SESSION_OPEN, bounded_stop, last_atr, last_rvol, make_signal, today_bars,
+                                        tunable_defaults)
 
 
 @dataclass(frozen=True)
@@ -57,3 +58,4 @@ class OrbDetector:
 
 
 orb = OrbDetector()
+DEFAULTS: dict = tunable_defaults(OrbDetector)

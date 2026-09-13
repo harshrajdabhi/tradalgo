@@ -52,8 +52,26 @@ strategies:
   pullback:       {enabled: true, window_start: "09:30", window_end: "14:00"}
   range_breakout: {enabled: true, window_start: "09:30", window_end: "14:00"}
 
+# Per-strategy detector tunables go in strategies.<name>.params (e.g. orb: {..., params: {min_rvol: 2.0}});
+# unknown keys are rejected. See tradalgo/strategies/<name>.py DEFAULTS.
+
 position_management:
   partial_exit_fraction: 0.6
+  partial_exit_at_r: 2.0          # partial fires here; runner exits at runner_target_r
+  breakeven_after_partial: true
+  runner_target_r: 3.0
+  stop_atr_min: 0.5               # detector stops bounded to [min, max] x ATR14(5m)
+  stop_atr_max: 2.0
+
+regime:
+  adx_trend: 25.0
+  high_vol_pct: 90.0
+  range_mult: 1.5
+  range_lookback_sessions: 10
+  vol_lookback_sessions: 20
+  adx_period: 14
+  ema_period: 20
+  min_bars: 40
 
 backtest:
   slippage_pct: 0.05

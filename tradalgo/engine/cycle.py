@@ -250,7 +250,9 @@ def open_position(state: SessionState, plan: TradePlan, trade_id: int, settings:
     if pm is None:
         pm = state.position_manager[sig.symbol] = PositionManager(
             partial_fraction=s.position_management.partial_exit_fraction, trail_bars=s.risk.trail_bars,
-            hard_exit=s.market.hard_exit)
+            hard_exit=s.market.hard_exit, partial_at_r=s.position_management.partial_exit_at_r,
+            runner_target_r=s.position_management.runner_target_r,
+            breakeven_after_partial=s.position_management.breakeven_after_partial)
     pm.open(trade_id, plan)
     state.trades[trade_id] = {"symbol": sig.symbol, "strategy": sig.strategy, "qty": plan.qty,
                               "risk_per_share": sig.risk_per_share, "gross_r": 0.0, "closed": False,
@@ -285,11 +287,12 @@ def run_cycle(state: SessionState, now: datetime, frames_by_symbol: dict[str, Sy
     # the classifier's time-of-day volatility baseline needs ~20 sessions; detectors keep exactly history_sessions
     _, i15 = closed_session_frames(index_5m, now, deps.history_sessions)
     ri5, ri15 = closed_session_frames(index_5m, now, deps.regime_history_sessions)
-    market_regime = deps.classify(ri15, ri5)
+    regime_kw = s.regime.model_dump()
+    market_regime = deps.classify(ri15, ri5, **regime_kw)
     for symbol in sorted(views):
         c5, c15, daily = views[symbol]
         r5, r15 = closed_session_frames(frames_by_symbol[symbol].candles_5m, now, deps.regime_history_sessions)
-        ctx = _context(symbol, now, c5, c15, daily, i15, deps.classify(r15, r5), market_regime)
+        ctx = _context(symbol, now, c5, c15, daily, i15, deps.classify(r15, r5, **regime_kw), market_regime)
         for signal in deps.detect_all(ctx, s, deps.calendar):
             key = (signal.symbol, signal.strategy, signal.ts.isoformat())
             if key in state.seen_signals:
@@ -302,6 +305,8 @@ def run_cycle(state: SessionState, now: datetime, frames_by_symbol: dict[str, Sy
                 limits_state=state.risk, win_prob=s.risk.win_prob, runner_avg_r=s.risk.runner_avg_r,
                 min_room_r=s.risk.min_room_r, partial_fraction=s.position_management.partial_exit_fraction,
                 band_fraction_r=s.risk.band_fraction_r, costs_cfg=s.costs,
+                partial_at_r=s.position_management.partial_exit_at_r,
+                runner_target_r=s.position_management.runner_target_r,
             )
             sink.record_decision(signal_id, decision)
             if isinstance(decision, TradePlan):
