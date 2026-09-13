@@ -1,10 +1,11 @@
 """Logic extracted from the Streamlit pages (tradalgo/dashboard/pages/*.py), which will be
 deleted at B4. Kept here, tested here, and imported by the API routes.
 """
+import json
 from datetime import datetime, timedelta
 
 import pandas as pd
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
 
 from tradalgo.api import now as now_mod
 from tradalgo.clock import IST
@@ -140,12 +141,65 @@ def safe_refresh_token_expiry(store) -> str | None:
         return None
 
 
-# ---- 8_settings.py: full-config replace (moved server-side) -----------------------------------
+# ---- backtest trade replay: legs_json (per-leg events), when the column exists -----------------
 
-def merged_settings(current: dict, new_partial: dict) -> dict:
-    """Shallow-merge top-level sections; the API accepts a full config dict from the client, so
-    this mainly guards against a client sending a partial document by mistake.
+_MARKER_KIND = {
+    "partial_exit": "partial_exit", "stop_hit": "stop_hit", "runner_exit": "runner_exit",
+    "hard_exit": "hard_exit", "trail_update": "trail_update", "target": "runner_exit",
+    "entry": "entry",
+}
+
+
+def load_backtest_trade(engine: Engine, run_id: int, trade_id: int) -> dict | None:
+    """Selects every column `backtest_trades` actually has (via `SELECT *`), so this works whether
+    or not a `legs_json` column has been migrated in yet — no dependency on storage/schema.py's
+    Table object having a column definition for it.
     """
-    out = dict(current)
-    out.update(new_partial)
-    return out
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT * FROM backtest_trades WHERE id = :id AND backtest_run_id = :run_id"),
+            {"id": trade_id, "run_id": run_id},
+        ).mappings().first()
+    return dict(row) if row is not None else None
+
+
+def _epoch(ts) -> int:
+    return int(pd.Timestamp(ts).timestamp())
+
+
+def trade_replay_markers(trade: dict, entry_stop: float | None) -> dict:
+    """{"markers": [...], "stop_path": [...]}.
+
+    When `legs_json` (a JSON list of {kind, ts, price, qty, r, new_stop?}) is present and parses,
+    every leg becomes a marker in order and each trail_update's new_stop steps the stop_path.
+    Otherwise (column missing, NULL, or unparseable) falls back to entry + the row's own final
+    exit fields, with a flat stop_path at the entry stop.
+    """
+    entry_marker = {"time": _epoch(trade["entry_ts"]), "kind": "entry",
+                    "price": trade["entry_price"], "qty": trade["qty"], "r": 0.0}
+    stop_path = [{"time": _epoch(trade["entry_ts"]), "value": entry_stop}]
+
+    legs_raw = trade.get("legs_json")
+    legs = None
+    if legs_raw:
+        try:
+            legs = json.loads(legs_raw)
+        except (TypeError, ValueError):
+            legs = None
+
+    if legs:
+        markers = [entry_marker]
+        for leg in legs:
+            kind = _MARKER_KIND.get(leg.get("kind"), leg.get("kind"))
+            markers.append({"time": _epoch(leg["ts"]), "kind": kind, "price": leg.get("price"),
+                            "qty": leg.get("qty"), "r": leg.get("r")})
+            if leg.get("kind") == "trail_update" and leg.get("new_stop") is not None:
+                stop_path.append({"time": _epoch(leg["ts"]), "value": leg["new_stop"]})
+        return {"markers": markers, "stop_path": stop_path}
+
+    exit_marker = {
+        "time": _epoch(trade["exit_ts"]),
+        "kind": _MARKER_KIND.get(trade["exit_reason"], trade["exit_reason"]),
+        "price": trade["exit_price"], "qty": trade["qty"], "r": trade["net_r"],
+    }
+    return {"markers": [entry_marker, exit_marker], "stop_path": stop_path}

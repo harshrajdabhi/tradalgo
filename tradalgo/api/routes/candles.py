@@ -1,12 +1,11 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import Engine
 
 from tradalgo.api import services
-from fastapi import Request
-
 from tradalgo.api.deps import get_engine, settings_for_request
+from tradalgo.api.util import is_valid_symbol
 from tradalgo.clock import IST
 from tradalgo.config import Settings
 from tradalgo.dashboard import queries
@@ -26,6 +25,8 @@ def _engine(settings: Settings = Depends(_settings)) -> Engine:
 @router.get("/{symbol}")
 def get_candles(symbol: str, date: str | None = Query(default=None), engine: Engine = Depends(_engine),
                 settings: Settings = Depends(_settings)):
+    if not is_valid_symbol(symbol):
+        raise HTTPException(status_code=404, detail=f"invalid symbol {symbol!r}")
     trade_date = date or datetime.now(IST).date().isoformat()
     day = datetime.fromisoformat(trade_date).date()
 

@@ -23,6 +23,15 @@ def seeded(tmp_path):
     return TestClient(app), ids
 
 
+@pytest.fixture
+def seeded_cfg(tmp_path):
+    """Like `seeded`, but also hands back the config path so a test can reach the DB directly
+    (e.g. to simulate a not-yet-migrated column via a raw ALTER TABLE)."""
+    config_path, ids = make_seeded_config(tmp_path)
+    app = create_app(str(config_path))
+    return TestClient(app), ids, config_path
+
+
 def test_health_empty(empty_client):
     r = empty_client.get("/api/health")
     assert r.status_code == 200
@@ -286,3 +295,137 @@ def test_sweeps_list_and_get(tmp_path):
     r2 = client.get("/api/sweeps/sweep-20260914-000000")
     assert r2.status_code == 200
     assert "recommended_yaml" in r2.json()
+
+
+# ---- Fix round 1: symbol validation ------------------------------------------------------------
+
+@pytest.mark.parametrize("bad_symbol", ["../x", "..%2Fx", "reliance", "A" * 21])
+def test_candles_rejects_invalid_symbol(empty_client, bad_symbol):
+    r = empty_client.get(f"/api/candles/{bad_symbol}", params={"date": "2026-09-10"})
+    assert r.status_code == 404
+
+
+@pytest.mark.parametrize("good_symbol", ["M&M", "BAJAJ-AUTO"])
+def test_candles_accepts_valid_symbol(empty_client, good_symbol):
+    r = empty_client.get(f"/api/candles/{good_symbol}", params={"date": "2026-09-10"})
+    assert r.status_code == 200
+    assert r.json()["candles"] == []
+
+
+def test_trade_replay_rejects_invalid_symbol(seeded_cfg):
+    import sqlalchemy as sa
+
+    client, ids, config_path = seeded_cfg
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+    engine = sa.create_engine(f"sqlite:///{cfg['paths']['data_dir']}/tradalgo.db")
+    with engine.begin() as conn:
+        conn.execute(sa.text("UPDATE backtest_trades SET symbol = '../x' WHERE id = :id"),
+                    {"id": ids["trade_id"]})
+    engine.dispose()
+
+    r = client.get(f"/api/backtests/{ids['run_id']}/trades/{ids['trade_id']}/replay")
+    assert r.status_code == 404
+
+
+# ---- Fix round 1: SPA fallback with a tmp web/dist -----------------------------------------
+
+@pytest.fixture
+def spa_client(tmp_path):
+    config_path = make_empty_config(tmp_path)
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html><body>spa shell</body></html>")
+    (dist / "assets" / "app.js").write_text("console.log('hi')")
+    app = create_app(str(config_path), web_dist=str(dist))
+    return TestClient(app)
+
+
+def test_spa_serves_index_at_root(spa_client):
+    r = spa_client.get("/")
+    assert r.status_code == 200
+    assert "spa shell" in r.text
+
+
+def test_spa_serves_index_for_client_route(spa_client):
+    r = spa_client.get("/backtests/5")
+    assert r.status_code == 200
+    assert "spa shell" in r.text
+
+
+def test_spa_serves_real_asset(spa_client):
+    r = spa_client.get("/assets/app.js")
+    assert r.status_code == 200
+    assert "console.log" in r.text
+
+
+def test_spa_unknown_api_route_is_json_404(spa_client):
+    r = spa_client.get("/api/unknown")
+    assert r.status_code == 404
+    assert r.json() == {"detail": "not found"}
+
+
+# ---- Fix round 1: legs_json-driven replay markers + stop_path ------------------------------
+
+def _add_legs_json_column(config_path):
+    """Ensures `backtest_trades.legs_json` exists, whether or not the schema migration (owned by
+    another agent) has landed yet in this checkout — the API must work either way.
+    """
+    import sqlalchemy as sa
+
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+    engine = sa.create_engine(f"sqlite:///{cfg['paths']['data_dir']}/tradalgo.db")
+    existing = {c["name"] for c in sa.inspect(engine).get_columns("backtest_trades")}
+    if "legs_json" not in existing:
+        with engine.begin() as conn:
+            conn.execute(sa.text("ALTER TABLE backtest_trades ADD COLUMN legs_json TEXT"))
+    return engine
+
+
+def test_trade_replay_uses_legs_json_when_present(seeded_cfg):
+    import sqlalchemy as sa
+
+    client, ids, config_path = seeded_cfg
+    engine = _add_legs_json_column(config_path)
+    legs = [
+        {"kind": "partial_exit", "ts": "2026-09-10T09:35:00+05:30", "price": 102.0, "qty": 5, "r": 1.0},
+        {"kind": "trail_update", "ts": "2026-09-10T09:40:00+05:30", "price": None, "qty": 0, "r": 0.0,
+         "new_stop": 100.0},
+        {"kind": "stop_hit", "ts": "2026-09-10T09:45:00+05:30", "price": 100.0, "qty": 5, "r": 0.5},
+    ]
+    with engine.begin() as conn:
+        conn.execute(sa.text("UPDATE backtest_trades SET legs_json = :legs WHERE id = :id"),
+                    {"legs": json.dumps(legs), "id": ids["trade_id"]})
+    engine.dispose()
+
+    r = client.get(f"/api/backtests/{ids['run_id']}/trades/{ids['trade_id']}/replay")
+    assert r.status_code == 200
+    body = r.json()
+    assert [m["kind"] for m in body["markers"]] == ["entry", "partial_exit", "trail_update", "stop_hit"]
+    assert len(body["markers"]) == 4
+    assert len(body["stop_path"]) == 2
+    assert body["stop_path"][0]["value"] == 98.0  # the signal's stop, at entry
+    assert body["stop_path"][1]["value"] == 100.0  # the trail_update's new_stop
+
+
+def test_trade_replay_falls_back_when_legs_json_null(seeded_cfg):
+    client, ids, config_path = seeded_cfg
+    _add_legs_json_column(config_path).dispose()  # column exists but is NULL for this row
+
+    r = client.get(f"/api/backtests/{ids['run_id']}/trades/{ids['trade_id']}/replay")
+    assert r.status_code == 200
+    body = r.json()
+    assert [m["kind"] for m in body["markers"]] == ["entry", "runner_exit"]  # exit_reason="target"
+    assert len(body["stop_path"]) == 1
+
+
+def test_trade_replay_falls_back_when_column_missing(seeded):
+    """No migration at all (today's schema): same fallback shape as the NULL case."""
+    client, ids = seeded
+    r = client.get(f"/api/backtests/{ids['run_id']}/trades/{ids['trade_id']}/replay")
+    assert r.status_code == 200
+    body = r.json()
+    assert [m["kind"] for m in body["markers"]] == ["entry", "runner_exit"]
+    assert len(body["stop_path"]) == 1
+    assert body["stop_path"][0]["value"] == 98.0

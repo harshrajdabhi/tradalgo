@@ -1,22 +1,19 @@
+import json
 from datetime import datetime
 
-import json
-
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import Engine, select
 
 from tradalgo.api import services
-from fastapi import Request
-
 from tradalgo.api.deps import get_engine, settings_for_request
 from tradalgo.api.models import BacktestParams, GateResult
-from tradalgo.api.util import df_records
+from tradalgo.api.util import df_records, is_valid_symbol
 from tradalgo.backtest import diagnostics
 from tradalgo.clock import IST
 from tradalgo.config import Settings
 from tradalgo.dashboard import controls, queries
-from tradalgo.storage.schema import backtest_trades
+from tradalgo.storage.schema import backtest_runs
 
 router = APIRouter(prefix="/api/backtests", tags=["backtests"])
 
@@ -50,11 +47,11 @@ def cancel_backtest(run_id: int, engine: Engine = Depends(_engine)):
 
 
 def _run_row(engine: Engine, run_id: int) -> dict:
-    df = queries.backtest_runs_list(engine)
-    matches = df[df["id"] == run_id] if not df.empty else df
-    if matches.empty:
+    with engine.connect() as conn:
+        row = conn.execute(select(backtest_runs).where(backtest_runs.c.id == run_id)).mappings().first()
+    if row is None:
         raise HTTPException(status_code=404, detail=f"backtest run {run_id} not found")
-    return df_records(matches)[0]
+    return dict(row)
 
 
 @router.get("/{run_id}")
@@ -147,23 +144,14 @@ def get_backtest_trades(run_id: int, strategy: str | None = None, symbol: str | 
     return df_records(df)
 
 
-_MARKER_KIND = {
-    "partial_exit": "partial_exit", "stop_hit": "stop_hit", "runner_exit": "runner_exit",
-    "hard_exit": "hard_exit", "trail_update": "trail_update", "target": "runner_exit",
-}
-
-
 @router.get("/{run_id}/trades/{trade_id}/replay")
 def get_trade_replay(run_id: int, trade_id: int, engine: Engine = Depends(_engine),
                      settings: Settings = Depends(_settings)):
-    with engine.connect() as conn:
-        row = conn.execute(
-            select(backtest_trades).where(backtest_trades.c.id == trade_id,
-                                          backtest_trades.c.backtest_run_id == run_id)
-        ).mappings().first()
-    if row is None:
+    trade = services.load_backtest_trade(engine, run_id, trade_id)
+    if trade is None:
         raise HTTPException(status_code=404, detail=f"trade {trade_id} not found in run {run_id}")
-    trade = dict(row)
+    if not is_valid_symbol(trade["symbol"]):
+        raise HTTPException(status_code=404, detail=f"invalid symbol {trade['symbol']!r}")
 
     from tradalgo.data.candle_cache import CandleCache
     cache = CandleCache(settings.paths.data_dir / "candles", provider=None)
@@ -171,27 +159,23 @@ def get_trade_replay(run_id: int, trade_id: int, engine: Engine = Depends(_engin
     candles = services.day_candles(cache, trade["symbol"], day)
 
     sig_df = queries.signals_with_decisions(engine, day.isoformat())
+    entry_stop = None
     levels = {"entry": trade["entry_price"], "stop": None, "target_partial": None, "target_runner": None}
     if not sig_df.empty and trade.get("signal_id") is not None:
         sig_rows = sig_df[sig_df["signal_id"] == trade["signal_id"]]
         if not sig_rows.empty:
             sig = sig_rows.iloc[0]
-            levels = {"entry": trade["entry_price"], "stop": sig.get("stop_loss"),
+            entry_stop = sig.get("stop_loss")
+            levels = {"entry": trade["entry_price"], "stop": entry_stop,
                      "target_partial": sig.get("target_2r"), "target_runner": sig.get("target_3r")}
 
-    markers = [{
-        "time": int(pd.Timestamp(trade["entry_ts"]).timestamp()), "kind": "entry",
-        "price": trade["entry_price"], "qty": trade["qty"], "r": 0.0,
-    }, {
-        "time": int(pd.Timestamp(trade["exit_ts"]).timestamp()),
-        "kind": _MARKER_KIND.get(trade["exit_reason"], trade["exit_reason"]),
-        "price": trade["exit_price"], "qty": trade["qty"], "r": trade["net_r"],
-    }]
+    replay = services.trade_replay_markers(trade, entry_stop)
 
     return {
         "trade": trade,
         "candles": services.candles_to_json(candles),
         "session_vwap": services.vwap_to_json(candles),
         "levels": levels,
-        "markers": markers,
+        "markers": replay["markers"],
+        "stop_path": replay["stop_path"],
     }

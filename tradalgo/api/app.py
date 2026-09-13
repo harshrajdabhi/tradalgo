@@ -17,7 +17,7 @@ from tradalgo.api.routes import backtests, candles, controls, dashboard, sweeps
 DEV_ORIGINS = ["http://127.0.0.1:5173", "http://localhost:5173"]
 
 
-def create_app(config_path: str | None = None) -> FastAPI:
+def create_app(config_path: str | None = None, web_dist: str | Path | None = None) -> FastAPI:
     app = FastAPI(title="TradAlgo API")
     app.state.config_path = config_path or os.environ.get("TRADALGO_CONFIG", "config.yaml")
     app.add_middleware(
@@ -28,15 +28,17 @@ def create_app(config_path: str | None = None) -> FastAPI:
     for router in (dashboard.router, backtests.router, candles.router, controls.router, sweeps.router):
         app.include_router(router)
 
-    web_dist = Path("web/dist")
-    if web_dist.exists():
-        app.mount("/assets", StaticFiles(directory=web_dist / "assets"), name="assets")
+    dist = Path(web_dist) if web_dist is not None else Path("web/dist")
+    if dist.exists():
+        assets_dir = dist / "assets"
+        if assets_dir.exists():
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
         @app.exception_handler(404)
         async def spa_fallback(request: Request, exc):
             if request.url.path.startswith("/api"):
                 return JSONResponse(status_code=404, content={"detail": "not found"})
-            index = web_dist / "index.html"
+            index = dist / "index.html"
             if index.exists():
                 return FileResponse(index)
             return JSONResponse(status_code=404, content={"detail": "not found"})
