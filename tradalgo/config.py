@@ -20,9 +20,20 @@ class CapitalConfig(BaseModel):
     max_risk_pct: float = Field(gt=0, le=0.03)
     max_leverage: float = Field(ge=1, le=5)
     fallback_leverage: float = Field(ge=1, le=5)
-    fixed_cost_rupees: float = Field(ge=0)
+    fixed_cost_rupees: float = Field(default=0.0, ge=0)  # unused since v2 A2; costs come from CostsConfig
     max_trades_per_day: int = Field(ge=1, le=2)
     daily_loss_limit_r: float = Field(gt=0)
+
+
+class CostsConfig(BaseModel):
+    brokerage_pct_per_order: float = Field(default=0.0003, ge=0)
+    brokerage_cap_per_order: float = Field(default=20.0, ge=0)
+    stt_sell_pct: float = Field(default=0.0002, ge=0)
+    exchange_txn_pct: float = Field(default=0.0000297, ge=0)
+    sebi_per_crore: float = Field(default=10.0, ge=0)
+    stamp_buy_pct: float = Field(default=0.00003, ge=0)
+    gst_pct: float = Field(default=0.18, ge=0)
+    ipft_per_crore: float = Field(default=0.0, ge=0)
 
 
 class ScreenerConfig(BaseModel):
@@ -127,6 +138,7 @@ class Settings(BaseModel):
     strategies: dict[str, StrategyConfig]
     position_management: PositionConfig
     backtest: BacktestConfig
+    costs: CostsConfig = CostsConfig()
     risk: RiskTuning = RiskTuning()
     preopen: PreopenConfig = PreopenConfig()
     telegram: TelegramConfig = TelegramConfig()

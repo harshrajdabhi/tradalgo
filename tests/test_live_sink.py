@@ -5,7 +5,9 @@ from sqlalchemy import insert, select
 
 from tradalgo.clock import IST, FixedClock
 from tradalgo.engine.events import PositionEvent
+from tradalgo.config import CostsConfig
 from tradalgo.engine.live_sink import LiveSink
+from tradalgo.risk.costs import intraday_charges
 from tradalgo.risk.plan import Rejection
 from tradalgo.storage.schema import alerts, decisions, paper_trades, signals, user_actions
 from tests.backtest_fixtures import at, make_plan, make_signal
@@ -96,7 +98,8 @@ def test_events_update_trade_and_alert_only_when_taken(engine):
     assert t["exit_reason"] == "runner_exit" and t["exit_price"] == 103.0
     assert t["exit_ts"] == datetime(2026, 9, 15, 10, 30, tzinfo=IST).isoformat()
     assert t["gross_r"] == pytest.approx(0.6 * 2 + 0.4 * 3)
-    assert t["net_r"] == pytest.approx(2.4 - 50 / 100)
+    charges = intraday_charges(100.0 * 100, 102.0 * 60 + 103.0 * 40, CostsConfig(), orders=3)
+    assert t["net_r"] == pytest.approx(2.4 - charges / 100)
     assert [a["alert_type"] for a in rows(engine, alerts)] == ["entry", "event"]
 
 
@@ -108,7 +111,8 @@ def test_single_qty_partial_closes_trade(engine):
     s.emit_event(ev("partial_exit", trade_id, 102.0, 1, 2.0), taken=False)
     s.flush_event_alerts()
     t = rows(engine, paper_trades)[0]
-    assert t["exit_reason"] == "partial_exit" and t["net_r"] == pytest.approx(2.0 - 50)
+    assert t["exit_reason"] == "partial_exit" and t["net_r"] == pytest.approx(
+        2.0 - intraday_charges(100.0, 102.0, CostsConfig()) / 1)
 
 
 def test_recording_is_idempotent_against_the_db(engine):

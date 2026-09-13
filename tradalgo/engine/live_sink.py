@@ -10,19 +10,19 @@ from typing import Callable
 from sqlalchemy import Engine, insert, select, update
 
 from tradalgo.clock import Clock, to_ist
+from tradalgo.config import CostsConfig
 from tradalgo.engine.events import PositionEvent
 from tradalgo.notify.sender import enqueue_entry_alert, enqueue_event_alert
+from tradalgo.risk.costs import intraday_charges
 from tradalgo.risk.plan import TradePlan
 from tradalgo.storage.schema import alerts, decisions, paper_trades, signals, user_actions
-
-COST_RUPEES = 50.0
 
 
 class LiveSink:
     def __init__(self, engine: Engine, clock: Clock, degraded_fn: Callable[[], bool], alerts_enabled: bool,
-                 cost_rupees: float = COST_RUPEES):
+                 costs: CostsConfig | None = None):
         self.engine, self.clock, self.degraded_fn = engine, clock, degraded_fn
-        self.alerts_enabled, self.cost_rupees = alerts_enabled, cost_rupees
+        self.alerts_enabled, self.costs = alerts_enabled, costs or CostsConfig()
         self._pending: list[tuple[PositionEvent, bool]] = []
 
     def record_signal(self, signal) -> int:
@@ -95,7 +95,8 @@ class LiveSink:
         with self.engine.begin() as conn:
             t = conn.execute(
                 select(paper_trades.c.qty, paper_trades.c.gross_r, paper_trades.c.partial_exit_ts,
-                       paper_trades.c.exit_ts, signals.c.entry, signals.c.stop_loss)
+                       paper_trades.c.exit_ts, paper_trades.c.partial_exit_price, signals.c.entry,
+                       signals.c.stop_loss, signals.c.direction)
                 .join(signals, signals.c.id == paper_trades.c.signal_id)
                 .where(paper_trades.c.id == event.trade_id)
             ).mappings().one()
@@ -111,8 +112,15 @@ class LiveSink:
             if closes:
                 risk_rupees = t["qty"] * abs(t["entry"] - t["stop_loss"])
                 values.update(exit_ts=ts, exit_price=event.price, exit_reason=event.kind,
-                              net_r=gross - self.cost_rupees / risk_rupees)
+                              net_r=gross - self._charges(t, event) / risk_rupees)
             conn.execute(update(paper_trades).where(paper_trades.c.id == event.trade_id).values(**values))
+
+    def _charges(self, t, event: PositionEvent) -> float:
+        partial_qty = t["qty"] - event.qty if t["partial_exit_price"] is not None and event.kind != "partial_exit" else 0
+        exit_value = partial_qty * t["partial_exit_price"] + event.qty * event.price if partial_qty else t["qty"] * event.price
+        entry_value = t["qty"] * t["entry"]
+        buy, sell = (entry_value, exit_value) if t["direction"] == "long" else (exit_value, entry_value)
+        return intraday_charges(buy, sell, self.costs, 3 if partial_qty else 2)
 
     def record_excursions(self, trade_id: int, mfe_r: float, mae_r: float) -> None:
         with self.engine.begin() as conn:

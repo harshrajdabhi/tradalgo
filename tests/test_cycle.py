@@ -5,6 +5,7 @@ import pytest
 
 from tradalgo.clock import MarketCalendar
 from tradalgo.engine.cycle import CycleDeps, SessionState, SymbolFrames, build_context, register_taken, run_cycle
+from tradalgo.risk.costs import intraday_charges
 from tradalgo.risk.plan import Rejection, TradePlan
 from tradalgo.risk.validator import validate
 from tests.backtest_fixtures import TODAY, at, bars, daily_trend, fake_classify, make_signal, rising_day, trading_weekdays
@@ -104,7 +105,9 @@ def test_kill_switch_blocks_entries_but_manages_open_trades(deps_for, tmp_path):
               check_kill_switch=True)
     assert [s.symbol for s in sink.signals] == ["AAA"]
     assert [(e.kind, e.ts) for e, _ in sink.events] == [("stop_hit", at(9, 45))]
-    assert st.risk.realized_r == pytest.approx(-1.0 - 50 / (st.trades[101]["qty"] * 1.0))
+    m = st.trades[101]
+    charges = intraday_charges(m["entry"] * m["qty"], (m["entry"] - 1.0) * m["qty"], deps.settings.costs)
+    assert st.risk.realized_r == pytest.approx(-1.0 - charges / (m["qty"] * 1.0))
 
 
 def test_daily_limit_rejects_third_trade(deps_for):
@@ -198,7 +201,9 @@ def test_shared_route_events_used_for_ticks_matches_bar_routing(deps_for):
     route_events(st, pm, events, deps.settings, sink)
     assert [(e.kind, t) for e, t in sink.events] == [("stop_hit", True)]
     assert st.trades[101]["closed"] and st.risk.open_trade_symbols == []
-    assert st.risk.realized_r == pytest.approx(-1.1 - 50 / (st.trades[101]["qty"] * 1.0))
+    m = st.trades[101]
+    charges = intraday_charges(m["entry"] * m["qty"], (m["entry"] - 1.1) * m["qty"], deps.settings.costs)
+    assert st.risk.realized_r == pytest.approx(-1.1 - charges / (m["qty"] * 1.0))
 
 
 def test_open_position_registers_trade_and_seen_key(settings):

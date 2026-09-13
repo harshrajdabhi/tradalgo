@@ -195,7 +195,7 @@ def run_backtest(settings: Settings, engine: Engine, params: dict, run_id: int, 
         deps.classify = classify
     if detect_all is not None:
         deps.detect_all = detect_all
-    broker = PaperBroker(s.backtest.slippage_pct, s.capital.fixed_cost_rupees)
+    broker = PaperBroker(s.backtest.slippage_pct, s.costs)
     intraday = _IntradayCache(cache)
     capital = s.capital.initial_capital
     records: list[dict] = []

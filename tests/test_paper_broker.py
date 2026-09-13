@@ -1,8 +1,14 @@
 import pytest
 
 from tradalgo.backtest.paper_broker import PaperBroker
+from tradalgo.config import CostsConfig
+from tradalgo.risk.costs import intraday_charges
 from tradalgo.engine.positions import PositionManager
 from tests.backtest_fixtures import at, make_plan, make_signal
+
+COSTS = CostsConfig()
+FREE = CostsConfig(brokerage_pct_per_order=0, stt_sell_pct=0, exchange_txn_pct=0, sebi_per_crore=0,
+                   stamp_buy_pct=0, gst_pct=0)
 
 
 @pytest.fixture
@@ -30,29 +36,32 @@ def _stop_exit(broker, plan, stop_price):
     return rec
 
 
-def test_slippage_and_fixed_cost_arithmetic(plan):
-    broker = PaperBroker(slippage_pct=0.1, fixed_cost=50.0)
+def test_slippage_and_modeled_charges_arithmetic(plan):
+    broker = PaperBroker(slippage_pct=0.1, costs=COSTS)
     rec = _stop_exit(broker, plan, stop_price=100.0)
     assert rec["exit_reason"] == "stop_hit"
     assert rec["gross_r"] == pytest.approx(-1.05)            # (99 - 100.05) * 100 / (100 * 1)
-    assert rec["net_r_no_slippage"] == pytest.approx(-1.55)  # minus 50 / 100
+    raw_charges = intraday_charges(100.05 * 100, 99 * 100, COSTS)
+    assert rec["net_r_no_slippage"] == pytest.approx(-1.05 - raw_charges / 100)
     # entry 100.05 * 1.001 = 100.15005; exit 99 * 0.999 = 98.901
     assert rec["entry_price"] == pytest.approx(100.15005)
     assert rec["exit_price"] == pytest.approx(98.901)
-    assert rec["net_rupees"] == pytest.approx(-174.905)
-    assert rec["net_r"] == pytest.approx(-1.74905)
+    charges = intraday_charges(100.15005 * 100, 98.901 * 100, COSTS)
+    assert charges == pytest.approx(10.047, abs=0.01)
+    assert rec["net_rupees"] == pytest.approx(-124.905 - charges)
+    assert rec["net_r"] == pytest.approx((-124.905 - charges) / 100)
     assert rec["signal_id"] == 7 and rec["qty"] == 100
 
 
 def test_gap_through_stop_fills_at_worse_open(plan):
-    broker = PaperBroker(slippage_pct=0.0, fixed_cost=0.0)
+    broker = PaperBroker(slippage_pct=0.0, costs=FREE)
     rec = _stop_exit(broker, plan, stop_price=98.0)
     assert rec["exit_price"] == pytest.approx(98.0)
     assert rec["gross_r"] == pytest.approx(-2.05)
 
 
 def test_partial_and_runner_legs(plan):
-    broker = PaperBroker(slippage_pct=0.0, fixed_cost=50.0)
+    broker = PaperBroker(slippage_pct=0.0, costs=COSTS)
     tid = broker.open(plan, signal_id=1, entry_ts=at(9, 40), fill=100.0)
     pm = PositionManager()
     pm.open(tid, plan, 100.0)
@@ -64,11 +73,12 @@ def test_partial_and_runner_legs(plan):
         rec = broker.on_event(ev) or rec
     assert [leg["kind"] for leg in rec["legs"]] == ["partial_exit", "runner_exit"]
     assert rec["gross_r"] == pytest.approx(0.6 * 2 + 0.4 * 3)
-    assert rec["net_r"] == pytest.approx(2.4 - 0.5)
+    charges = intraday_charges(100.0 * 100, 102.0 * 60 + 103.0 * 40, COSTS, orders=3)
+    assert rec["net_r"] == pytest.approx(2.4 - charges / 100)
 
 
 def test_mfe_mae_tracked_while_open(plan):
-    broker = PaperBroker(slippage_pct=0.0, fixed_cost=0.0)
+    broker = PaperBroker(slippage_pct=0.0, costs=FREE)
     tid = broker.open(plan, signal_id=1, entry_ts=at(9, 40), fill=100.0)
     broker.on_bar(tid, at(9, 35), high=110.0, low=90.0)  # before entry: ignored
     broker.on_bar(tid, at(9, 40), high=101.5, low=99.4)

@@ -6,14 +6,16 @@ to every exit leg. R unit = signal risk per share x qty. MFE/MAE are measured fr
 import itertools
 from datetime import datetime
 
+from tradalgo.config import CostsConfig
 from tradalgo.engine.events import PositionEvent
+from tradalgo.risk.costs import intraday_charges
 from tradalgo.risk.plan import TradePlan
 
 
 class PaperBroker:
-    def __init__(self, slippage_pct: float, fixed_cost: float):
+    def __init__(self, slippage_pct: float, costs: CostsConfig):
         self.slip = slippage_pct / 100
-        self.fixed_cost = fixed_cost
+        self.costs = costs
         self.missed: list[dict] = []
         self._open: dict[int, dict] = {}
         self._ids = itertools.count(1)
@@ -74,7 +76,11 @@ class PaperBroker:
         gross_pnl = sum(sign * (leg["price"] - t["fill"]) * leg["qty"] for leg in t["legs"])
         slipped_pnl = sum(sign * (px - entry_slipped) * leg["qty"] for px, leg in zip(exits_slipped, t["legs"]))
         unit = plan.qty * sig.risk_per_share
-        net_rupees = slipped_pnl - self.fixed_cost
+        orders = 1 + len(t["legs"])
+        net_rupees = slipped_pnl - self._charges(sign, entry_slipped * plan.qty,
+                                                 sum(px * leg["qty"] for px, leg in zip(exits_slipped, t["legs"])), orders)
+        charges_no_slip = self._charges(sign, t["fill"] * plan.qty,
+                                        sum(leg["price"] * leg["qty"] for leg in t["legs"]), orders)
         return {
             "signal_id": t["signal_id"], "trade_date": sig.ts.date(), "symbol": sig.symbol,
             "strategy": sig.strategy, "direction": sig.direction, "regime": sig.regime.value,
@@ -84,9 +90,13 @@ class PaperBroker:
             "exit_reason": t["legs"][-1]["kind"], "qty": plan.qty,
             "mfe_r": t["mfe_r"], "mae_r": t["mae_r"],
             "gross_r": gross_pnl / unit,
-            "net_r_no_slippage": (gross_pnl - self.fixed_cost) / unit,
+            "net_r_no_slippage": (gross_pnl - charges_no_slip) / unit,
             "net_r": net_rupees / unit,
             "net_rupees": net_rupees,
             "slippage_rupees": gross_pnl - slipped_pnl,
             "legs": t["legs"],
         }
+
+    def _charges(self, sign: int, entry_value: float, exit_value: float, orders: int) -> float:
+        buy, sell = (entry_value, exit_value) if sign == 1 else (exit_value, entry_value)
+        return intraday_charges(buy, sell, self.costs, orders)

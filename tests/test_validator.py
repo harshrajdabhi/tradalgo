@@ -4,6 +4,8 @@ import pytest
 
 from tradalgo.clock import IST
 from tradalgo.config import CapitalConfig
+from tradalgo.risk.costs import estimate_round_trip
+from tradalgo.config import CostsConfig
 from tradalgo.risk.limits import DailyRiskState
 from tradalgo.risk.plan import Rejection, TradePlan
 from tradalgo.risk.validator import validate
@@ -31,9 +33,12 @@ def test_accepted_long_exact_numbers():
     assert p.risk_rupees == pytest.approx(272 * 2.2)
     assert p.risk_rupees <= 600.0
     assert (p.target_2r, p.target_3r) == (104.0, 106.0)
-    assert p.est_cost == 50.0
+    assert p.est_cost == pytest.approx(estimate_round_trip(100.2, 272, "long", CostsConfig()))
+    assert p.est_cost == pytest.approx(2 * 8.1763 + 0.0000297 * 54508.8 + 54508.8 * 1e-6 + 0.0002 * 27254.4
+                                       + 0.00003 * 27254.4 + 0.18 * (2 * 8.1763 + 0.0000297 * 54508.8 + 54508.8 * 1e-6),
+                                       rel=1e-4)
     assert p.room_to_level_r == pytest.approx(2.4)             # (105 - 100.2) / 2
-    assert p.expected_value_r == pytest.approx(0.4 * 2.0 - 0.6 - 50 / (272 * 2))
+    assert p.expected_value_r == pytest.approx(0.4 * 2.0 - 0.6 - p.est_cost / (272 * 2))
     assert (p.limit_low, p.limit_high) == pytest.approx((100.0, 100.2))
     assert p.valid_until == TS + timedelta(minutes=10)
 
@@ -66,7 +71,8 @@ def test_no_opposing_level_is_finite():
         (dict(signal=sig(), state=DailyRiskState(date(2026, 9, 10))), "stale"),
         (dict(signal=sig("short", 200.0, 204.0), levels=[195.0]), "room"),
         (dict(signal=sig(), win_prob=0.3), "expected value"),
-        (dict(signal=sig(entry=100.0, stop=99.0), capital=1000.0), "expected value"),  # 30 qty -> cost_r 1.67
+        (dict(signal=sig(entry=100.0, stop=99.0), capital=1000.0,  # 30 qty, 1% brokerage -> cost_r ~2
+              costs_cfg=CostsConfig(brokerage_pct_per_order=0.01, brokerage_cap_per_order=100)), "expected value"),
     ],
 )
 def test_rejections(kwargs, reason):
@@ -86,4 +92,4 @@ def test_band_fill_risk_never_exceeds_cap():
 
 def test_ev_uses_partial_and_runner_weights():
     p = run(sig(), runner_avg_r=3.0, partial_fraction=0.5)
-    assert p.expected_value_r == pytest.approx(0.4 * (0.5 * 2 + 0.5 * 3.0) - 0.6 - 50 / (272 * 2))
+    assert p.expected_value_r == pytest.approx(0.4 * (0.5 * 2 + 0.5 * 3.0) - 0.6 - p.est_cost / (272 * 2))

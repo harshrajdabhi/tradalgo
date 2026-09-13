@@ -14,6 +14,7 @@ from tradalgo.engine.positions import PositionManager
 from tradalgo.indicators.levels import key_levels, opening_range
 from tradalgo.risk.limits import (DailyRiskState, kill_switch_active, register_entry, register_exit,
                                   release_entry)
+from tradalgo.risk.costs import intraday_charges
 from tradalgo.risk.plan import Rejection, TradePlan
 from tradalgo.risk.validator import validate as validate_signal
 from tradalgo.strategies import registry
@@ -150,7 +151,15 @@ class SessionState:
 
 
 def _cost_r(settings: Settings, meta: dict) -> float:
-    return settings.capital.fixed_cost_rupees / (meta["qty"] * meta["risk_per_share"])
+    qty, entry = meta["qty"], meta.get("entry")
+    if entry is None:  # a state saved before costs were modeled: no leg prices to price charges on
+        return 0.0
+    exited = meta.get("exit_qty", 0)
+    # any qty not yet booked (a restored close) is priced at entry
+    exit_value = meta.get("exit_value", 0.0) + (qty - exited) * entry
+    orders = 1 + max(meta.get("exit_orders", 0), 1)
+    buy, sell = (entry * qty, exit_value) if meta.get("direction", "long") == "long" else (exit_value, entry * qty)
+    return intraday_charges(buy, sell, settings.costs, orders) / (qty * meta["risk_per_share"])
 
 
 def reserve_slot(state: SessionState, trade_id: int) -> None:
@@ -220,6 +229,10 @@ def route_events(state: SessionState, pm: PositionManager, events: list[Position
     for ev in events:
         meta = state.trades[ev.trade_id]
         meta["gross_r"] += float(ev.r_multiple) * ev.qty / meta["qty"]
+        if ev.qty:
+            meta["exit_value"] = meta.get("exit_value", 0.0) + float(ev.price) * ev.qty
+            meta["exit_qty"] = meta.get("exit_qty", 0) + ev.qty
+            meta["exit_orders"] = meta.get("exit_orders", 0) + 1
         taken = sink.is_taken(ev.trade_id)
         if taken:
             register_taken(state, ev.trade_id)
@@ -242,6 +255,7 @@ def open_position(state: SessionState, plan: TradePlan, trade_id: int, settings:
     pm.open(trade_id, plan)
     state.trades[trade_id] = {"symbol": sig.symbol, "strategy": sig.strategy, "qty": plan.qty,
                               "risk_per_share": sig.risk_per_share, "gross_r": 0.0, "closed": False,
+                              "entry": sig.entry, "direction": sig.direction,
                               "valid_until": to_ist(plan.valid_until).isoformat()}
     state.seen_signals.add((sig.symbol, sig.strategy, sig.ts.isoformat()))
 
@@ -288,7 +302,7 @@ def run_cycle(state: SessionState, now: datetime, frames_by_symbol: dict[str, Sy
                 symbol_leverage=deps.leverage(signal.symbol), levels=deps.levels(daily, c5, now),
                 limits_state=state.risk, win_prob=s.risk.win_prob, runner_avg_r=s.risk.runner_avg_r,
                 min_room_r=s.risk.min_room_r, partial_fraction=s.position_management.partial_exit_fraction,
-                band_fraction_r=s.risk.band_fraction_r,
+                band_fraction_r=s.risk.band_fraction_r, costs_cfg=s.costs,
             )
             sink.record_decision(signal_id, decision)
             if isinstance(decision, TradePlan):
