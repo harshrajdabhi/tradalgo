@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -19,9 +20,7 @@ from tradalgo.screener.preopen import annotate_preopen
 from tradalgo.screener.run import run_screen
 from tradalgo.storage.db import init_db, make_engine
 from tradalgo.storage.repo import finish_job_run, has_job_succeeded_on, start_job_run
-from tradalgo.storage.schema import health_events, shortlist
-
-PENDING = ["session", "backtest", "worker", "report"]
+from tradalgo.storage.schema import backtest_runs, health_events, shortlist
 
 # Injection points for tests: monkeypatch these instead of hitting the network or keychain.
 clock_factory = SystemClock
@@ -255,6 +254,194 @@ def cmd_preopen(settings, args) -> int:
     return 0
 
 
+def build_tick_stream_factory(settings, store, today, on_fallback):
+    """A TickStream factory bound to today's FYERS token, or None if FYERS auth is unavailable."""
+    from tradalgo.data.fyers_auth import get_access_token, require
+    from tradalgo.data.fyers_socket import TickStream
+
+    try:
+        token = get_access_token(store, today)
+        app_id = require(store, "FYERS_APP_ID")
+    except Exception as exc:
+        on_fallback(f"FYERS unavailable for live ticks ({exc}); running without tick stream")
+        return None
+
+    def factory(on_tick):
+        return TickStream(token, app_id, on_tick, on_status=lambda msg: print(f"tick stream: {msg}", file=sys.stderr))
+
+    return factory
+
+
+def cmd_session(settings, args) -> int:
+    from tradalgo.engine.live_sink import LiveSink
+    from tradalgo.engine.session import LiveSession, run_session, shortlist_symbols
+
+    clock = clock_factory()
+    store = store_factory()
+    engine = make_engine(settings.paths.db_path)
+    now = clock.now()
+    trade_date = _resolve_trade_date(args, clock)
+
+    calendar = MarketCalendar(settings.market, load_holidays(settings.paths.static_dir, trade_date.year))
+    if not calendar.is_trading_day(trade_date):
+        print(f"{trade_date} is not a trading day; skipping session")
+        return 0
+    if not shortlist_symbols(engine, trade_date):
+        print(f"no shortlist for {trade_date}; run `tradalgo screen` first")
+        return 0
+
+    def on_fallback(message):
+        _record_health_event(engine, now, "data", message)
+
+    provider = build_screen_provider(settings, store, trade_date, on_fallback)
+    cache = CandleCache(settings.paths.data_dir / "candles", provider)
+    tick_stream_factory = build_tick_stream_factory(settings, store, trade_date, on_fallback)
+
+    def sink_factory(degraded_fn):
+        return LiveSink(engine, clock, degraded_fn, settings.telegram.enabled)
+
+    session = LiveSession(settings, engine, clock, provider, cache, sink_factory,
+                          tick_stream_factory=tick_stream_factory,
+                          state_dir=settings.paths.data_dir / "session")
+    started = run_session(settings, engine, clock, session, trade_date)
+    if not started:
+        print(f"no session today for {trade_date}")
+    return 0
+
+
+def cmd_backtest(settings, args) -> int:
+    from tradalgo.dashboard.controls import validate_backtest_params
+    from tradalgo.data.universe import load_universe
+    from tradalgo.jobs.backtest_worker import process_run
+
+    clock = clock_factory()
+    engine = make_engine(settings.paths.db_path)
+    now = clock.now()
+
+    params = {
+        "from": args.from_date, "to": args.to_date, "universe": args.universe,
+        "strategies": args.strategies.split(","), "shortlist_size": args.shortlist_size,
+        "slippage_pct": args.slippage_pct if args.slippage_pct is not None else settings.backtest.slippage_pct,
+        "max_risk_pct": args.max_risk_pct, "initial_capital": args.capital,
+    }
+    try:
+        validate_backtest_params(params)
+    except ValueError as exc:
+        print(f"invalid backtest params: {exc}", file=sys.stderr)
+        return 1
+
+    from tradalgo.storage.repo import claim_next_backtest_run, enqueue_backtest_run
+
+    run_id = enqueue_backtest_run(engine, params, now)
+    print(f"queued backtest run {run_id}")
+
+    universe = load_universe(settings.paths.static_dir)
+    while True:
+        claimed = claim_next_backtest_run(engine, clock.now())
+        if claimed is None:
+            break
+        print(f"processing backtest run {claimed}...")
+        status = process_run(settings, engine, clock, claimed, universe=universe)
+        print(f"run {claimed}: {status}")
+        if claimed == run_id:
+            break
+
+    with engine.connect() as conn:
+        row = conn.execute(select(backtest_runs.c.status, backtest_runs.c.metrics_json, backtest_runs.c.error)
+                           .where(backtest_runs.c.id == run_id)).mappings().first()
+
+    if row["status"] != "done":
+        print(f"backtest failed: {row['error']}", file=sys.stderr)
+        return 1
+
+    metrics = json.loads(row["metrics_json"])
+    print(f"trades: {metrics['trades']}  win_rate: {metrics['win_rate']:.2%}  "
+         f"expectancy_r: {metrics['expectancy_r']:.4f}  expectancy_r_no_slippage: {metrics['expectancy_r_no_slippage']:.4f}")
+    print(f"profit_factor: {metrics['profit_factor']}  max_drawdown_r: {metrics['max_drawdown_r']}  "
+         f"fill_rate: {metrics['fill_rate']}  missed_entries: {metrics['missed_entries']}")
+    print("by_strategy:")
+    for name, s in metrics["by_strategy"].items():
+        print(f"  {name}: trades={s['trades']} win_rate={s['win_rate']:.2%} expectancy_r={s['expectancy_r']:.4f}")
+
+    gate_pass = metrics["trades"] >= 100 and metrics["expectancy_r"] > 0
+    if gate_pass:
+        print("M6 gate: PASS")
+    else:
+        reason = []
+        if metrics["trades"] < 100:
+            reason.append(f"only {metrics['trades']} trades (need >= 100)")
+        if metrics["expectancy_r"] <= 0:
+            reason.append(f"expectancy_r {metrics['expectancy_r']} <= 0")
+        print(f"M6 gate: FAIL ({'; '.join(reason)})")
+    return 0
+
+
+def cmd_worker(settings, args) -> int:
+    import time as time_module
+
+    from tradalgo.jobs.backtest_worker import build_telegram_client, run_worker
+    from tradalgo.jobs.maintenance import run_maintenance
+    from tradalgo.notify.updates import process_updates  # noqa: F401  (used indirectly by poll_telegram_updates)
+    from tradalgo.engine.session import poll_telegram_updates, status_text_for
+
+    clock = clock_factory()
+    store = store_factory()
+    engine = make_engine(settings.paths.db_path)
+    telegram_client = build_telegram_client(store)
+    data_dir = settings.paths.data_dir
+    offset_path = data_dir / "telegram_offset.json"
+    status_text = status_text_for(engine, clock, data_dir / "session", data_dir)
+    allowed_chat_id = store.get("TELEGRAM_CHAT_ID")
+
+    def safe_maintenance():
+        try:
+            run_maintenance(settings, engine, store, clock)
+        except Exception as exc:
+            _record_health_event(engine, clock.now(), "worker", f"maintenance failed: {exc}")
+
+    def safe_poll():
+        if telegram_client is None:
+            return
+        try:
+            poll_telegram_updates(engine, telegram_client, clock, data_dir, allowed_chat_id, status_text, offset_path)
+        except Exception as exc:
+            _record_health_event(engine, clock.now(), "worker", f"telegram poll failed: {exc}")
+
+    safe_maintenance()
+    last_maintenance_date = to_ist(clock.now()).date()
+    try:
+        while True:
+            run_worker(settings, engine, clock, once=True, telegram_client=telegram_client)
+            safe_poll()
+            today = to_ist(clock.now()).date()
+            if today != last_maintenance_date:
+                safe_maintenance()
+                last_maintenance_date = today
+            time_module.sleep(5)
+    except KeyboardInterrupt:
+        print("worker stopped")
+        return 0
+
+
+def cmd_report(settings, args) -> int:
+    from tradalgo import reporting
+
+    clock = clock_factory()
+    engine = make_engine(settings.paths.db_path)
+    now = clock.now()
+    end_date = to_ist(now).date()
+
+    report = reporting.weekly_report(engine, end_date, weeks=args.weeks)
+    divergence = reporting.live_vs_backtest(engine, int(args.run_id) if args.run_id else None)
+    text = reporting.format_report_text(report, divergence)
+    print(text)
+
+    if args.telegram:
+        dedup_key = f"report:{report['week_end']}:{args.weeks}"
+        enqueue_text_alert(engine, "report", dedup_key, text, now)
+    return 0
+
+
 def cmd_dashboard(settings, args) -> int:
     env = {**os.environ, "TRADALGO_CONFIG": str(Path(args.config).resolve())}
     cmd = ["streamlit", "run", "tradalgo/dashboard/app.py",
@@ -327,24 +514,40 @@ def main(argv: list[str] | None = None) -> int:
     preopen = sub.add_parser("preopen", help="09:08 pre-open gap annotation")
     preopen.add_argument("--date", default=None)
 
+    session = sub.add_parser("session", help="live 5-minute alert session during market hours")
+    session.add_argument("--date", default=None)
+
+    backtest = sub.add_parser("backtest", help="walk-forward strategy backtest")
+    backtest.add_argument("--from", dest="from_date", required=True)
+    backtest.add_argument("--to", dest="to_date", required=True)
+    backtest.add_argument("--universe", default="both", choices=("nifty50", "niftynext50", "both"))
+    backtest.add_argument("--strategies", default="orb,gap,vwap,pdhl,pullback,range_breakout")
+    backtest.add_argument("--shortlist-size", type=int, default=6)
+    backtest.add_argument("--slippage-pct", type=float, default=None)
+    backtest.add_argument("--max-risk-pct", type=float, default=0.02)
+    backtest.add_argument("--capital", type=float, default=20000.0)
+
+    sub.add_parser("worker", help="always-on job worker: backtests, telegram sender/poller, maintenance")
+
+    report = sub.add_parser("report", help="weekly performance and live-vs-backtest report")
+    report.add_argument("--weeks", type=int, default=1)
+    report.add_argument("--run-id", dest="run_id", default=None)
+    report.add_argument("--telegram", action="store_true")
+
     sub.add_parser("dashboard", help="launch the Streamlit dashboard on 127.0.0.1")
 
     install_launchd = sub.add_parser("install-launchd", help="render and install launchd plists")
     install_launchd.add_argument("--dest", default="~/Library/LaunchAgents")
     install_launchd.add_argument("--dry-run", action="store_true")
 
-    for name in PENDING:
-        sub.add_parser(name, help="not implemented yet")
     args = parser.parse_args(argv)
 
     handlers = {
         "init": cmd_init, "login": cmd_login, "backfill": cmd_backfill,
         "screen": cmd_screen, "preopen": cmd_preopen, "dashboard": cmd_dashboard,
-        "install-launchd": cmd_install_launchd,
+        "install-launchd": cmd_install_launchd, "session": cmd_session, "backtest": cmd_backtest,
+        "worker": cmd_worker, "report": cmd_report,
     }
-    if args.command not in handlers:
-        print(f"'{args.command}' is not implemented yet", file=sys.stderr)
-        return 2
     return handlers[args.command](load_settings(args.config), args)
 
 

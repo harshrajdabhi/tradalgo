@@ -68,9 +68,23 @@ capped at `capital.max_leverage` regardless of what the file says.
 2. **09:08** `tradalgo preopen` — annotates the shortlist with the actual pre-open gap and demotes picks
    where the gap has used up the expected move. Never adds new symbols. Skipped (with a warning) if FYERS
    quotes are unavailable — yfinance has no pre-open data.
-3. **09:00–15:30** `tradalgo session` — the market-hours process (M6/M7).
-4. Always-on `tradalgo worker` — sends queued Telegram alerts (including the 07:00/09:08 shortlist) and
-   retries failures, independent of whether the session process is running.
+3. **09:15–15:31** `tradalgo session` — the market-hours process: runs the shared engine cycle every 5
+   minutes on today's shortlist, tracks open paper trades tick by tick, and queues entry/event/EOD alerts.
+   Skips cleanly (exit 0) on a non-trading day or when today has no shortlist.
+4. Always-on `tradalgo worker` — sends queued Telegram alerts (including the 07:00/09:08 shortlist), polls
+   Telegram for Taken/Skipped button replies and `/status` requests, runs queued backtests, and once per
+   day runs maintenance (FYERS token-expiry reminder, log rotation, old-data pruning). Independent of
+   whether the session process is running. Stop it with Ctrl+C.
+5. `tradalgo backtest --from YYYY-MM-DD --to YYYY-MM-DD [--universe both] [--strategies orb,gap,...] [--shortlist-size 6] [--slippage-pct X] [--max-risk-pct X] [--capital X]` —
+   walk-forward replay of the same detectors/risk rules over cached candles. Prints trade count, win rate,
+   expectancy (with and without slippage), profit factor, max drawdown, fill rate, missed entries, a
+   by-strategy breakdown, and the M6 gate verdict. Fails with a `tradalgo backfill` hint if the candle
+   cache doesn't cover the requested range.
+6. `tradalgo report [--weeks N] [--run-id ID] [--telegram]` — prints the weekly performance report (taken
+   vs not-taken, response rate, by-strategy expectancy) and a live-vs-backtest divergence check against the
+   latest (or given) backtest run; `--telegram` also queues it for the worker to send.
+
+**Verify the M6 backtest gate with `tradalgo backtest --from ... --to ...` before trusting live alerts.**
 
 ## Dashboard
 
