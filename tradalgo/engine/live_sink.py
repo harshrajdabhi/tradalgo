@@ -3,6 +3,8 @@
 Stateless over the DB (trade -> signal -> entry alert -> user action) so a restarted session sees the same truth.
 """
 import json
+from dataclasses import asdict
+from datetime import datetime
 from typing import Callable
 
 from sqlalchemy import Engine, insert, select, update
@@ -21,6 +23,7 @@ class LiveSink:
                  cost_rupees: float = COST_RUPEES):
         self.engine, self.clock, self.degraded_fn = engine, clock, degraded_fn
         self.alerts_enabled, self.cost_rupees = alerts_enabled, cost_rupees
+        self._pending: list[tuple[PositionEvent, bool]] = []
 
     def record_signal(self, signal) -> int:
         ts = to_ist(signal.ts).isoformat()
@@ -64,10 +67,29 @@ class LiveSink:
         return trade_id
 
     def emit_event(self, event: PositionEvent, taken: bool) -> None:
-        if event.kind != "trail_update":
-            self._record_exit_leg(event)
-        if taken and self.alerts_enabled:
-            enqueue_event_alert(self.engine, event, self.clock.now())
+        # save-then-alert: nothing leaves memory until the session has persisted the state these events produced
+        self._pending.append((event, taken))
+
+    def pending_events(self) -> list[dict]:
+        return [{"event": {**asdict(ev), "ts": to_ist(ev.ts).isoformat()}, "taken": taken}
+                for ev, taken in self._pending]
+
+    def restore_pending(self, items: list[dict]) -> None:
+        self._pending = [(PositionEvent(**{**i["event"], "ts": datetime.fromisoformat(i["event"]["ts"])}), i["taken"])
+                         for i in items]
+
+    def flush_event_alerts(self) -> int:
+        """Apply buffered exit legs and queue management alerts. Safe to repeat: legs and alerts are idempotent."""
+        flushed = 0
+        while self._pending:
+            event, taken = self._pending[0]
+            if event.kind != "trail_update":
+                self._record_exit_leg(event)
+            if taken and self.alerts_enabled:
+                enqueue_event_alert(self.engine, event, self.clock.now())
+            self._pending.pop(0)
+            flushed += 1
+        return flushed
 
     def _record_exit_leg(self, event: PositionEvent) -> None:
         with self.engine.begin() as conn:

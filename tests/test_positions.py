@@ -270,3 +270,60 @@ def test_tick_only_path_unchanged_after_late_bar_rule():
     pm.open(1, plan())
     assert kinds(pm.on_price(at(10, 6), 104.0, 104.0, 104.0, False)) == ["partial_exit", "trail_update"]
     assert kinds(pm.on_price(at(10, 7), 106.0, 106.0, 106.0, False)) == ["runner_exit"]
+
+
+
+def _bar(direction, h, l, c, o=None):
+    """A long-side bar (high, low, close, open) mirrored around 150 for the short case."""
+    o = c if o is None else o
+    if direction == "long":
+        return h, l, c, o
+    f = lambda x: 300.0 - x
+    return f(l), f(h), f(c), f(o)
+
+
+@pytest.mark.parametrize("direction", ["long", "short"])
+def test_bar_after_trail_is_enforced_at_the_alerted_stop_while_ticks_flow(direction):
+    """Live order: each tick lands a few seconds after a bar closes, before the cycle applies that bar."""
+    f = (lambda x: x) if direction == "long" else (lambda x: 300.0 - x)
+    pm = PositionManager(trail_bars=1)
+    pm.open(1, plan() if direction == "long" else plan("short", 200.0, 202.0))
+
+    def bar(close_at, h, l, c, o=None):
+        hh, ll, cc, oo = _bar(direction, h, l, c, o)
+        return pm.on_price(close_at, hh, ll, cc, True, open=oo)
+
+    bar(at(10, 5), 104.0, 100.5, 103.0)                                    # partial, stop -> breakeven
+    for mm, low in ((10, 101.5), (15, 102.0), (20, 102.5)):
+        pm.on_price(at(10, mm).replace(second=5), f(103.0), f(103.0), f(103.0), False)
+        bar(at(10, mm), 103.5, low, 103.2)
+    assert pm.open_trades()[0].stop == f(102.5)
+    pm.on_price(at(10, 25).replace(second=5), f(103.0), f(103.0), f(103.0), False)
+    ev = bar(at(10, 25), 103.0, 101.0, 101.5, 103.0)
+    assert kinds(ev) == ["stop_hit"] and ev[0].price == f(102.5)
+    assert bar(at(10, 30), 103.0, 101.0, 101.5) == []
+
+
+def test_runner_exit_seen_only_in_the_bar():
+    pm = PositionManager(trail_bars=5)
+    pm.open(1, plan())
+    pm.on_price(at(10, 5), 104.0, 100.5, 103.0, True)                       # partial before the next bar starts
+    pm.on_price(at(10, 5).replace(second=10), 103.0, 103.0, 103.0, False)
+    ev = pm.on_price(at(10, 10), 106.5, 102.0, 105.0, True)
+    assert kinds(ev) == ["runner_exit"]
+    assert pm.on_price(at(10, 15), 107.0, 106.0, 106.5, True) == []
+
+
+def test_change_history_is_pruned_over_a_day():
+    pm = PositionManager()
+    pm.open(1, plan(entry=100.0, stop=90.0))
+    t = at(9, 20)
+    price, longest = 100.0, 0
+    while t.hour < 15:
+        pm.on_price(t + timedelta(seconds=5), price + 0.3, price + 0.3, price + 0.3, False)
+        pm.on_price(t, price + 0.5, price - 0.05, price + 0.2, True)
+        if pm.open_trades():
+            longest = max(longest, len(pm.open_trades()[0].changes))
+        price += 0.1
+        t += timedelta(minutes=5)
+    assert longest <= 2

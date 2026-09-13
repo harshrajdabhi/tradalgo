@@ -86,10 +86,12 @@ def test_events_update_trade_and_alert_only_when_taken(engine):
     s, trade_id, _ = open_trade(engine)
     s.emit_event(ev("partial_exit", trade_id, 102.0, 60, 2.0), taken=False)
     s.emit_event(ev("trail_update", trade_id, 102.0, 0, 0.0), taken=False)
+    s.flush_event_alerts()
     t = rows(engine, paper_trades)[0]
     assert t["partial_exit_price"] == 102.0 and t["exit_ts"] is None
     assert len(rows(engine, alerts)) == 1
     s.emit_event(ev("runner_exit", trade_id, 103.0, 40, 3.0, 10, 30), taken=True)
+    s.flush_event_alerts()
     t = rows(engine, paper_trades)[0]
     assert t["exit_reason"] == "runner_exit" and t["exit_price"] == 103.0
     assert t["exit_ts"] == datetime(2026, 9, 15, 10, 30, tzinfo=IST).isoformat()
@@ -104,6 +106,7 @@ def test_single_qty_partial_closes_trade(engine):
     sid = s.record_signal(sig)
     trade_id = s.accept(make_plan(sig, qty=1), sid)
     s.emit_event(ev("partial_exit", trade_id, 102.0, 1, 2.0), taken=False)
+    s.flush_event_alerts()
     t = rows(engine, paper_trades)[0]
     assert t["exit_reason"] == "partial_exit" and t["net_r"] == pytest.approx(2.0 - 50)
 
@@ -139,10 +142,13 @@ def test_exit_leg_is_applied_only_once_per_leg(engine):
     partial = ev("partial_exit", trade_id, 102.0, 60, 2.0)
     s.emit_event(partial, taken=True)
     s.emit_event(ev("partial_exit", trade_id, 102.0, 60, 2.0, 10, 5), taken=True)
+    s.flush_event_alerts()
     assert rows(engine, paper_trades)[0]["gross_r"] == pytest.approx(1.2)
     final = ev("hard_exit", trade_id, 101.0, 40, 1.0, 15, 0)
     s.emit_event(final, taken=True)
+    s.flush_event_alerts()
     s.emit_event(final, taken=True)
+    s.flush_event_alerts()
     t = rows(engine, paper_trades)[0]
     assert t["gross_r"] == pytest.approx(1.2 + 0.4) and t["exit_reason"] == "hard_exit"
     assert [a["alert_type"] for a in rows(engine, alerts)] == ["entry", "event", "event"]
@@ -153,3 +159,15 @@ def test_button_tap_price_equal_to_entry_is_not_slippage(engine):
     tap(engine, price=100.0)   # notify.updates stores the plan entry, not a real fill
     s.newly_taken_trade_ids(0)
     assert rows(engine, paper_trades)[0]["slippage_rupees"] is None
+
+
+def test_event_effects_wait_for_flush_and_pending_round_trips(engine):
+    s, trade_id, _ = open_trade(engine)
+    s.emit_event(ev("stop_hit", trade_id, 99.0, 100, -1.0), taken=True)
+    assert len(rows(engine, alerts)) == 1 and rows(engine, paper_trades)[0]["exit_ts"] is None
+    saved = s.pending_events()
+    other = sink(engine)
+    other.restore_pending(saved)
+    assert other.flush_event_alerts() == 1 and other.pending_events() == []
+    assert s.flush_event_alerts() == 1   # a re-flush of the same events is harmless
+    assert len(rows(engine, alerts)) == 2 and rows(engine, paper_trades)[0]["exit_reason"] == "stop_hit"

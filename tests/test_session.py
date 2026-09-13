@@ -266,6 +266,7 @@ def test_each_cycle_refetches_todays_bars_through_the_real_cache(env):
 class CrashAfter(LiveSink):
     """Simulates the process dying right after a DB write, before the session saves its state."""
     crash_on: str = "accept"
+    crash_at = at(10, 10)
 
     def accept(self, plan, signal_id):
         trade_id = super().accept(plan, signal_id)
@@ -277,6 +278,11 @@ class CrashAfter(LiveSink):
         super().emit_event(event, taken)
         if (self.crash_on, event.kind) in (("exit", "stop_hit"), ("partial", "partial_exit")):
             raise SystemExit("crash")
+
+    def flush_event_alerts(self):
+        if self.crash_on == "flush" and self.pending_events() and self.clock.now() >= self.crash_at:
+            raise SystemExit("crash")
+        return super().flush_event_alerts()
 
 
 def crash_run(session, clock, start, end):
@@ -301,7 +307,7 @@ def test_crash_between_accept_and_save_adopts_the_db_trade(env):
     assert fresh.state.risk.trades_taken == 1
 
 
-def test_crash_after_exit_before_save_does_not_realert(env):
+def test_crash_before_persisting_an_exit_sends_nothing_and_keeps_the_pre_event_stop(env):
     _, engine, _ = env
     CrashExit = type("CrashExit", (CrashAfter,), {"crash_on": "exit"})
     first, clock = make_session(env, provider=FakeProvider(frames(stop_bar=True)), sink_cls=CrashExit)
@@ -309,24 +315,43 @@ def test_crash_after_exit_before_save_does_not_realert(env):
     run(first, clock, at(9, 20), at(9, 40))
     tap(engine)
     crash_run(first, clock, at(9, 45), at(9, 45))
+    assert kinds(engine) == ["entry"] and q(engine, paper_trades)[0]["exit_ts"] is None
     fresh, clock = make_session(env, provider=FakeProvider(frames(stop_bar=True)), clock=Clk(at(9, 50)))
     fresh.start(TODAY)
-    run(fresh, clock, at(9, 50), at(10, 0))
-    assert kinds(engine) == ["entry", "stop_hit"]
-    assert fresh.state.risk.trades_taken == 1 and fresh.state.risk.realized_r < -1
-    assert fresh.state.risk.open_trade_symbols == []
+    assert fresh.state.position_manager["AAA"].open_trades()[0].stop == 99.0
+    assert kinds(engine) == ["entry"]
+
+
+def test_crash_between_persist_and_flush_resends_once_with_persisted_stop(env, tmp_path):
+    _, engine, tmp = env
+    CrashFlush = type("CrashFlush", (CrashAfter,), {"crash_on": "flush"})
+    first, clock = make_session(env, sink_cls=CrashFlush)
+    first.start(TODAY)
+    run(first, clock, at(9, 20), at(9, 40))
+    tap(engine)
+    crash_run(first, clock, at(9, 45), at(10, 10))
+    key = f"trail_update:1:{at(10, 10).isoformat()}"
+    assert key not in {a["dedup_key"] for a in q(engine, alerts)}
+    saved = json.loads((tmp / "state" / f"session_state_{TODAY.isoformat()}.json").read_text())
+    saved_stop = saved["position_manager"]["AAA"]["trades"][0]["stop"]
+    fresh, clock = make_session(env, clock=Clk(at(10, 15)))
+    fresh.start(TODAY)
+    assert fresh.state.position_manager["AAA"].open_trades()[0].stop == saved_stop
+    assert [a["dedup_key"] for a in q(engine, alerts)].count(key) == 1
+    run(fresh, clock, at(10, 15), at(10, 30))
+    assert kinds(engine).count("partial_exit") == 1
 
 
 def test_crash_after_partial_write_does_not_double_r_or_realert(env):
     _, engine, _ = env
-    CrashPartial = type("CrashPartial", (CrashAfter,), {"crash_on": "partial"})
+    # save-then-alert: the partial leg reaches the DB only in the flush, so the replay risk is a re-flush
+    CrashPartial = type("CrashPartial", (CrashAfter,), {"crash_on": "flush", "crash_at": at(9, 50)})
     first, clock = make_session(env, sink_cls=CrashPartial)
     first.start(TODAY)
     run(first, clock, at(9, 20), at(9, 40))
     tap(engine)
     crash_run(first, clock, at(9, 45), at(9, 50))
-    partial_r = q(engine, paper_trades)[0]["gross_r"]
-    assert partial_r == pytest.approx(1.2)                 # 60% booked at 2R
+    assert "partial_exit" not in kinds(engine) and q(engine, paper_trades)[0]["gross_r"] is None
     fresh, clock = make_session(env, clock=Clk(at(9, 55)))
     fresh.start(TODAY)
     run(fresh, clock, at(9, 55), at(15, 30))

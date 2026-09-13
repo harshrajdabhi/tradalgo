@@ -91,16 +91,19 @@ class LiveSession:
             repo.finish_job_run(self.engine, self._job_id, now, error="empty shortlist")
             return False
         path = state_path(self.state_dir, trade_date)
-        self.state = (SessionState.from_dict(json.loads(path.read_text())) if path.exists()
+        saved = json.loads(path.read_text()) if path.exists() else None
+        self.state = (SessionState.from_dict(saved) if saved
                       else SessionState.new(trade_date, s.capital.initial_capital))
         overrides = {k: min(float(v), s.capital.max_leverage) for k, v in load_leverage_overrides(s.paths.static_dir).items()}
         self.deps = CycleDeps(settings=s, calendar=calendar, leverage=overrides.get)
         for name, value in self.cycle_overrides.items():
             setattr(self.deps, name, value)
         self.sink = self.sink_factory(lambda: self._degraded)
+        self.sink.restore_pending((saved or {}).get("pending_events", []))
         self._finished = False
         self._reconcile()
         self._persist()
+        self.sink.flush_event_alerts()  # a crash between persist and flush left these unsent
         if self.tick_stream_factory is not None:
             self.stream = self.tick_stream_factory(self.on_tick)
             self.stream.start()
@@ -139,6 +142,7 @@ class LiveSession:
 
     def _after_change(self) -> None:
         self._persist()
+        self.sink.flush_event_alerts()
         self._write_excursions()
         self._sync_subscriptions()
 
@@ -235,7 +239,8 @@ class LiveSession:
             self.stream.stop()  # outside the lock: close_connection may wait on a socket thread blocked in on_tick
 
     def _persist(self) -> None:
-        _write_atomic(state_path(self.state_dir, self.state.trade_date), json.dumps(self.state.to_dict()))
+        data = {**self.state.to_dict(), "pending_events": self.sink.pending_events()}
+        _write_atomic(state_path(self.state_dir, self.state.trade_date), json.dumps(data))
 
     def _sync_subscriptions(self) -> None:
         if self.stream is None:
