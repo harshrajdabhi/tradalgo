@@ -275,7 +275,7 @@ class CrashAfter(LiveSink):
 
     def emit_event(self, event, taken):
         super().emit_event(event, taken)
-        if self.crash_on == "exit" and event.kind == "stop_hit":
+        if (self.crash_on, event.kind) in (("exit", "stop_hit"), ("partial", "partial_exit")):
             raise SystemExit("crash")
 
 
@@ -315,3 +315,22 @@ def test_crash_after_exit_before_save_does_not_realert(env):
     assert kinds(engine) == ["entry", "stop_hit"]
     assert fresh.state.risk.trades_taken == 1 and fresh.state.risk.realized_r < -1
     assert fresh.state.risk.open_trade_symbols == []
+
+
+def test_crash_after_partial_write_does_not_double_r_or_realert(env):
+    _, engine, _ = env
+    CrashPartial = type("CrashPartial", (CrashAfter,), {"crash_on": "partial"})
+    first, clock = make_session(env, sink_cls=CrashPartial)
+    first.start(TODAY)
+    run(first, clock, at(9, 20), at(9, 40))
+    tap(engine)
+    crash_run(first, clock, at(9, 45), at(9, 50))
+    partial_r = q(engine, paper_trades)[0]["gross_r"]
+    assert partial_r == pytest.approx(1.2)                 # 60% booked at 2R
+    fresh, clock = make_session(env, clock=Clk(at(9, 55)))
+    fresh.start(TODAY)
+    run(fresh, clock, at(9, 55), at(15, 30))
+    assert kinds(engine).count("partial_exit") == 1
+    trade = q(engine, paper_trades)[0]
+    assert trade["exit_reason"] == "hard_exit"
+    assert trade["gross_r"] == pytest.approx(1.2 + 0.4 * (trade["exit_price"] - 100.0))

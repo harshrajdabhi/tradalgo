@@ -218,3 +218,16 @@ def test_expire_stale_ignores_not_yet_expired(engine):
     sender.send_pending(engine, client, FixedClock(NOW))
     count = sender.expire_stale(engine, client, FixedClock(NOW + timedelta(minutes=5)))
     assert count == 0
+
+
+def test_once_only_event_alerts_dedup_on_kind_and_trade(engine):
+    def event(kind, ts, **kw):
+        return PositionEvent(kind=kind, trade_id=7, symbol="SBIN", strategy="orb", ts=ts, price=812.4,
+                             qty=kw.get("qty", 12), new_stop=kw.get("new_stop"), r_multiple=2.0)
+
+    assert sender.enqueue_event_alert(engine, event("partial_exit", NOW), NOW) is not None
+    assert sender.enqueue_event_alert(engine, event("partial_exit", NOW + timedelta(minutes=5)), NOW) is None
+    first = sender.enqueue_event_alert(engine, event("trail_update", NOW, qty=0, new_stop=800.0), NOW)
+    second = sender.enqueue_event_alert(engine, event("trail_update", NOW + timedelta(minutes=5), qty=0,
+                                                      new_stop=805.0), NOW)
+    assert first is not None and second is not None and first != second

@@ -29,8 +29,13 @@ def enqueue_entry_alert(engine: Engine, plan: "TradePlan", signal_id: int | None
     return alert_id
 
 
+ONCE_ONLY_EVENTS = ("stop_hit", "partial_exit", "runner_exit", "hard_exit")
+
+
 def enqueue_event_alert(engine: Engine, event: "PositionEvent", now: datetime) -> int | None:
-    dedup_key = f"{event.kind}:{event.trade_id}:{event.ts.isoformat()}"
+    # each once-only leg happens at most once per trade, so a replay at a different ts must not re-alert
+    dedup_key = (f"{event.kind}:{event.trade_id}" if event.kind in ONCE_ONLY_EVENTS
+                 else f"{event.kind}:{event.trade_id}:{event.ts.isoformat()}")
     text = position_event_message(event)
     return repo.enqueue_alert(engine, dedup_key, "event", text, now, symbol=event.symbol)
 

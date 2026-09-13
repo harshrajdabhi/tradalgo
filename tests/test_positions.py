@@ -235,3 +235,38 @@ def test_excursions_tracked_in_r_and_round_trip():
     assert (t.mfe_r, t.mae_r) == (pytest.approx(1.25), pytest.approx(-0.5))
     back = PositionManager.from_dict(pm.to_dict())
     assert back.trades()[0].mfe_r == pytest.approx(1.25)
+
+
+def test_late_bar_is_judged_against_the_stop_in_effect_during_that_bar():
+    pm = PositionManager()
+    pm.open(1, plan())
+    tick = pm.on_price(at(10, 10).replace(second=5), 104.0, 104.0, 104.0, False)   # 2R: partial, stop -> 100
+    assert kinds(tick) == ["partial_exit", "trail_update"]
+    # the 10:05-10:10 bar never touched the ORIGINAL stop of 98, so the breakeven stop cannot retro-fire
+    assert pm.on_price(at(10, 10), 103.0, 99.5, 100.5, True) == []
+    assert pm.open_trades()[0].stop == 100.0
+
+
+def test_late_bar_short_mirror():
+    pm = PositionManager()
+    pm.open(1, plan("short", 200.0, 204.0))
+    assert kinds(pm.on_price(at(10, 10).replace(second=5), 192.0, 192.0, 192.0, False)) == \
+        ["partial_exit", "trail_update"]
+    assert pm.on_price(at(10, 10), 200.5, 197.0, 198.0, True) == []
+
+
+def test_late_bar_that_breached_the_original_stop_exits_once():
+    pm = PositionManager()
+    pm.open(1, plan())
+    assert kinds(pm.on_price(at(10, 10).replace(second=5), 104.0, 104.0, 104.0, False)) == \
+        ["partial_exit", "trail_update"]
+    ev = pm.on_price(at(10, 10), 103.0, 97.5, 98.5, True, open=99.0)
+    assert kinds(ev) == ["stop_hit"] and ev[0].price == 98.0
+    assert pm.on_price(at(10, 15), 104.0, 103.0, 103.5, True) == []
+
+
+def test_tick_only_path_unchanged_after_late_bar_rule():
+    pm = PositionManager()
+    pm.open(1, plan())
+    assert kinds(pm.on_price(at(10, 6), 104.0, 104.0, 104.0, False)) == ["partial_exit", "trail_update"]
+    assert kinds(pm.on_price(at(10, 7), 106.0, 106.0, 106.0, False)) == ["runner_exit"]

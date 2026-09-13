@@ -132,3 +132,24 @@ def test_slippage_null_without_price(engine):
     s, trade_id, _ = open_trade(engine)
     tap(engine)
     assert s.is_taken(trade_id) and rows(engine, paper_trades)[0]["slippage_rupees"] is None
+
+
+def test_exit_leg_is_applied_only_once_per_leg(engine):
+    s, trade_id, _ = open_trade(engine)
+    partial = ev("partial_exit", trade_id, 102.0, 60, 2.0)
+    s.emit_event(partial, taken=True)
+    s.emit_event(ev("partial_exit", trade_id, 102.0, 60, 2.0, 10, 5), taken=True)
+    assert rows(engine, paper_trades)[0]["gross_r"] == pytest.approx(1.2)
+    final = ev("hard_exit", trade_id, 101.0, 40, 1.0, 15, 0)
+    s.emit_event(final, taken=True)
+    s.emit_event(final, taken=True)
+    t = rows(engine, paper_trades)[0]
+    assert t["gross_r"] == pytest.approx(1.2 + 0.4) and t["exit_reason"] == "hard_exit"
+    assert [a["alert_type"] for a in rows(engine, alerts)] == ["entry", "event", "event"]
+
+
+def test_button_tap_price_equal_to_entry_is_not_slippage(engine):
+    s, trade_id, _ = open_trade(engine)
+    tap(engine, price=100.0)   # notify.updates stores the plan entry, not a real fill
+    s.newly_taken_trade_ids(0)
+    assert rows(engine, paper_trades)[0]["slippage_rupees"] is None

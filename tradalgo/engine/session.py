@@ -142,6 +142,15 @@ class LiveSession:
         self._write_excursions()
         self._sync_subscriptions()
 
+    def _restore_legs(self, st: SessionState, row, trade_id: int) -> None:
+        """A partial written to the DB but lost from the state must not be emitted (or counted) twice."""
+        if row["partial_exit_ts"] is None:
+            return
+        pm = st.position_manager[st.trades[trade_id]["symbol"]]
+        if not any(t.trade_id == trade_id and t.partial_done for t in pm.trades()):
+            pm.restore_partial(trade_id)
+            st.trades[trade_id]["gross_r"] = row["gross_r"] or 0.0
+
     def _write_excursions(self) -> None:
         for pm in self.state.position_manager.values():
             for t in pm.trades():
@@ -155,7 +164,7 @@ class LiveSession:
         with self.engine.connect() as conn:
             rows = conn.execute(
                 select(paper_trades.c.id.label("trade_id"), paper_trades.c.qty, paper_trades.c.exit_ts,
-                       paper_trades.c.gross_r, signals.c.ts, signals.c.symbol, signals.c.strategy,
+                       paper_trades.c.gross_r, paper_trades.c.partial_exit_ts, signals.c.ts, signals.c.symbol, signals.c.strategy,
                        signals.c.direction, signals.c.regime, signals.c.market_regime, signals.c.entry,
                        signals.c.stop_loss, signals.c.target_2r, signals.c.target_3r, decisions.c.leverage_used,
                        decisions.c.risk_rupees, decisions.c.est_cost, decisions.c.expected_value_r,
@@ -170,11 +179,15 @@ class LiveSession:
             if trade_id not in st.trades:
                 if r["exit_ts"] is None:
                     open_position(st, _plan_from_row(r), trade_id, s)
+                    self._restore_legs(st, r, trade_id)
                     if self.sink.is_taken(trade_id):
                         register_taken(st, trade_id, s)
                 continue
             meta = st.trades[trade_id]
-            if r["exit_ts"] is not None and not meta["closed"]:
+            if r["exit_ts"] is None:
+                self._restore_legs(st, r, trade_id)
+                continue
+            if not meta["closed"]:
                 st.position_manager[meta["symbol"]].close(trade_id)
                 meta["gross_r"], meta["closed"] = r["gross_r"] or 0.0, True
                 if trade_id in st.taken_trade_ids:

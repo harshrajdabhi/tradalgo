@@ -25,6 +25,10 @@ class ManagedTrade:
     closed: bool = False
     last_bar_ts: str | None = None
     last_tick_ts: str | None = None
+    # stop / partial status as they stood before the first tick applied after the last closed bar,
+    # so a bar arriving after that tick is still judged against the state in effect during the bar
+    pre_tick_stop: float | None = None
+    pre_tick_partial: bool | None = None
     mfe_r: float = 0.0
     mae_r: float = 0.0
     closed_highs: list[float] = field(default_factory=list)
@@ -48,7 +52,9 @@ class PositionManager:
 
     Closed bars and ticks have separate cursors: a bar is applied iff its close ts is newer than the last
     bar, so a tick landing between a bar's close and the cycle cannot swallow that bar; a tick is applied
-    iff newer than both the last tick and the last bar. Replays are idempotent.
+    iff newer than both the last tick and the last bar. A bar older than an already-applied tick is judged
+    against the stop and partial status in effect during that bar, never against what the later tick changed.
+    Replays are idempotent.
     """
 
     def __init__(self, partial_fraction: float = 0.6, trail_bars: int = 3, hard_exit: time = time(15, 0)):
@@ -72,6 +78,15 @@ class PositionManager:
     def trades(self) -> list[ManagedTrade]:
         return list(self._trades.values())
 
+    def restore_partial(self, trade_id: int) -> None:
+        """Crash recovery: the 2R partial is already recorded in the DB, so don't emit it again."""
+        t = self._trades[trade_id]
+        if t.partial_done:
+            return
+        t.partial_done = True
+        t.remaining = max(1, t.qty - max(1, math.floor(t.qty * self.partial_fraction)))
+        self._tighten(t, t.entry)
+
     def close(self, trade_id: int) -> None:
         """Crash recovery: the exit was already recorded elsewhere, stop managing without emitting."""
         t = self._trades[trade_id]
@@ -88,13 +103,22 @@ class PositionManager:
                 if last_bar is not None and ts <= last_bar:
                     continue
                 t.last_bar_ts = ts.isoformat()
+                late = last_tick is not None and ts <= last_tick
+                eff_stop = t.pre_tick_stop if late and t.pre_tick_stop is not None else t.stop
+                runner_ok = t.pre_tick_partial if late and t.pre_tick_partial is not None else None
+                if not late:
+                    t.pre_tick_stop, t.pre_tick_partial = None, None
             else:
                 if (last_tick is not None and ts <= last_tick) or (last_bar is not None and ts <= last_bar):
                     continue
+                if t.pre_tick_stop is None:
+                    t.pre_tick_stop, t.pre_tick_partial = t.stop, t.partial_done
                 t.last_tick_ts = ts.isoformat()
+                eff_stop, runner_ok = t.stop, None
             fav, adv = (high, low) if t.long else (low, high)
             t.mfe_r, t.mae_r = max(t.mfe_r, t.r_of(fav)), min(t.mae_r, t.r_of(adv))
-            events += self._update(t, ts, high, low, close, bar_closed, close if open is None else open)
+            events += self._update(t, ts, high, low, close, bar_closed, close if open is None else open,
+                                   eff_stop, runner_ok)
         return events
 
     def _event(self, t: ManagedTrade, kind, ts, price, qty, new_stop=None) -> PositionEvent:
@@ -110,11 +134,13 @@ class PositionManager:
         up = t.long == favorable
         return high >= level if up else low <= level
 
-    def _update(self, t: ManagedTrade, ts, high, low, close, bar_closed, open_) -> list[PositionEvent]:
+    def _update(self, t: ManagedTrade, ts, high, low, close, bar_closed, open_, eff_stop=None,
+                runner_ok=None) -> list[PositionEvent]:
+        eff_stop = t.stop if eff_stop is None else eff_stop
         # Stop is checked first: a bar touching both stop and target counts as stop-first (conservative).
-        if self._touches(t, t.stop, high, low, favorable=False):
+        if self._touches(t, eff_stop, high, low, favorable=False):
             # a gap through the stop fills at the (worse) open
-            fill = min(t.stop, open_) if t.long else max(t.stop, open_)
+            fill = min(eff_stop, open_) if t.long else max(eff_stop, open_)
             return [self._exit(t, "stop_hit", ts, fill)]
 
         events = []
@@ -128,7 +154,7 @@ class PositionManager:
             if self._tighten(t, t.entry):
                 events.append(self._event(t, "trail_update", ts, t.target_2r, 0, t.stop))
 
-        if t.partial_done and self._touches(t, t.target_3r, high, low, favorable=True):
+        if runner_ok is not False and t.partial_done and self._touches(t, t.target_3r, high, low, favorable=True):
             return events + [self._exit(t, "runner_exit", ts, t.target_3r)]
 
         if bar_closed:

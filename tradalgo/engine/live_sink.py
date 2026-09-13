@@ -72,15 +72,18 @@ class LiveSink:
     def _record_exit_leg(self, event: PositionEvent) -> None:
         with self.engine.begin() as conn:
             t = conn.execute(
-                select(paper_trades.c.qty, paper_trades.c.gross_r, signals.c.entry, signals.c.stop_loss)
+                select(paper_trades.c.qty, paper_trades.c.gross_r, paper_trades.c.partial_exit_ts,
+                       paper_trades.c.exit_ts, signals.c.entry, signals.c.stop_loss)
                 .join(signals, signals.c.id == paper_trades.c.signal_id)
                 .where(paper_trades.c.id == event.trade_id)
             ).mappings().one()
-            gross = (t["gross_r"] or 0.0) + event.r_multiple * event.qty / t["qty"]
             ts = to_ist(event.ts).isoformat()
-            values = {"gross_r": gross}
-            # the partial is always the first exit leg, so it closes the trade only when it covers all qty
             closes = event.kind != "partial_exit" or event.qty >= t["qty"]
+            already = t["exit_ts"] is not None if closes else t["partial_exit_ts"] is not None
+            if already:
+                return  # a restart can replay a leg whose DB row was written before the state save
+            gross = (t["gross_r"] or 0.0) + event.r_multiple * event.qty / t["qty"]
+            values = {"gross_r": gross}
             if event.kind == "partial_exit":
                 values.update(partial_exit_ts=ts, partial_exit_price=event.price)
             if closes:
@@ -104,7 +107,8 @@ class LiveSink:
     @staticmethod
     def _mark_taken(conn, row) -> None:
         slippage = None
-        if row["price"] is not None:
+        # the Taken button carries no fill price: notify.updates stores the plan entry, which is not slippage
+        if row["price"] is not None and row["price"] != row["entry"]:
             sign = 1 if row["direction"] == "long" else -1
             slippage = sign * (row["price"] - row["entry"]) * row["qty"]  # positive = paid worse than plan
         conn.execute(update(paper_trades).where(paper_trades.c.id == row["trade_id"]).values(
