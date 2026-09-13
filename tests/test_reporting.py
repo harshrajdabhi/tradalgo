@@ -163,3 +163,12 @@ def test_format_report_text_escapes_and_is_compact(engine):
     text = format_report_text(report, [])
     assert "Weekly Report" in text
     assert "<script>" not in text
+
+
+def test_format_report_text_prints_the_exact_rolling_window(engine):
+    seed_week(engine)
+    report = weekly_report(engine, WEEK_END, weeks=1)
+    # rolling 7-day window ending on WEEK_END (inclusive), not an ISO Mon-Sun week
+    assert report["week_start"] == "2026-09-05" and report["week_end"] == "2026-09-11"
+    text = format_report_text(report, [])
+    assert "2026-09-05 to 2026-09-11" in text

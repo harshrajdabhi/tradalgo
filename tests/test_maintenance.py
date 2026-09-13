@@ -8,7 +8,7 @@ from tradalgo.jobs.maintenance import prune_old_data, rotate_logs, run_maintenan
 from tradalgo.storage import repo
 from tradalgo.storage.db import init_db, make_engine
 from tradalgo.storage.schema import (
-    alerts, backtest_runs, decisions, health_events, paper_trades, signals, user_actions,
+    alerts, backtest_runs, backtest_trades, decisions, health_events, paper_trades, signals, user_actions,
 )
 
 NOW = datetime(2026, 9, 13, 7, 0, tzinfo=IST)
@@ -86,7 +86,7 @@ def test_rotate_logs_non_log_files_untouched(tmp_path):
     other.write_text("x" * 100)
     rotate_logs(log_dir, max_bytes=10)
     assert other.exists() and other.read_text() == "x" * 100
-    assert not big.exists()
+    assert big.exists() and big.read_text() == ""  # truncated in place, not renamed away
     assert (log_dir / "app.log.1").exists()
 
 
@@ -101,7 +101,25 @@ def test_rotate_logs_shifts_and_caps_at_keep(tmp_path):
     assert (log_dir / "app.log.1").read_text() == "x" * 100
     assert (log_dir / "app.log.2").read_text() == "gen1"
     assert not (log_dir / "app.log.3").exists()
-    assert not (log_dir / "app.log").exists()
+    assert (log_dir / "app.log").exists() and (log_dir / "app.log").read_text() == ""
+
+
+def test_rotate_logs_safe_for_an_open_append_writer(tmp_path):
+    """launchd holds StandardOutPath open with O_APPEND for the job's lifetime; rotation must
+    not break that handle the way a rename would."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    path = log_dir / "app.log"
+    path.write_text("x" * 100)
+
+    with open(path, "a") as writer:
+        rotated = rotate_logs(log_dir, max_bytes=10, keep=3)
+        assert rotated == [log_dir / "app.log.1"]
+        writer.write("new-entry")
+        writer.flush()
+
+    assert path.read_text() == "new-entry"
+    assert (log_dir / "app.log.1").read_text() == "x" * 100
 
 
 # ---- prune_old_data ----
@@ -145,13 +163,44 @@ def test_prune_removes_signals_and_decisions_of_old_failed_backtest_runs(engine)
         assert conn.execute(select(backtest_runs)).first() is not None  # run row itself is kept
 
 
+def _insert_backtest_trade(engine, run_id, signal_id):
+    with engine.begin() as conn:
+        conn.execute(insert(backtest_trades).values(
+            backtest_run_id=run_id, signal_id=signal_id, trade_date="2026-01-01", symbol="X",
+            strategy="orb", direction="long", entry_ts=_iso("2026-01-01"), entry_price=1.0,
+            exit_ts=_iso("2026-01-01"), exit_price=1.1, exit_reason="target", qty=1,
+            gross_r=1.0, net_r=1.0,
+        ))
+
+
+def test_prune_removes_backtest_trades_leaving_no_orphaned_fk_rows(engine):
+    _seed_backtest_signal(engine, 1, "cancelled", _iso("2026-01-01"))
+    _insert_backtest_trade(engine, run_id=1, signal_id=1)
+
+    result = prune_old_data(engine, FixedClock(NOW), keep_days=365)
+
+    assert result["backtest_trades_deleted"] == 1
+    with engine.connect() as conn:
+        assert conn.execute(select(backtest_trades)).first() is None
+        # LEFT JOIN orphan check: no backtest_trades row should reference a missing signal.
+        orphans = conn.execute(
+            select(backtest_trades.c.id)
+            .select_from(backtest_trades.outerjoin(signals, backtest_trades.c.signal_id == signals.c.id))
+            .where(signals.c.id.is_(None), backtest_trades.c.signal_id.isnot(None))
+        ).all()
+        assert orphans == []
+        assert conn.execute(select(backtest_runs)).first() is not None  # run row itself is kept
+
+
 def test_prune_never_touches_recent_or_done_backtest_signals(engine):
     _seed_backtest_signal(engine, 1, "failed", _iso("2026-09-10"))  # too recent
     _seed_backtest_signal(engine, 2, "done", _iso("2026-01-01"))  # completed, protected
+    _insert_backtest_trade(engine, run_id=2, signal_id=2)
     result = prune_old_data(engine, FixedClock(NOW), keep_days=365)
-    assert result["signals_deleted"] == 0
+    assert result["signals_deleted"] == 0 and result["backtest_trades_deleted"] == 0
     with engine.connect() as conn:
         assert len(conn.execute(select(signals)).all()) == 2
+        assert len(conn.execute(select(backtest_trades)).all()) == 1
 
 
 def test_prune_never_touches_live_signals_alerts_actions_or_paper_trades(engine):

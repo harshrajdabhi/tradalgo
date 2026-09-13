@@ -17,6 +17,12 @@ def _iso_date(value: str) -> date:
 
 
 def _week_bounds(end_date: date, weeks: int) -> tuple[date, date]:
+    """A rolling `weeks * 7`-day trailing window ending on `end_date` (inclusive), IST dates.
+
+    Deliberately not an ISO Monday-start calendar week: `weekly_report` is meant to be callable
+    for any `end_date` (e.g. "as of today") and still cover exactly `weeks` full weeks of data,
+    which a fixed Mon-Sun bucket wouldn't do for a mid-week `end_date`.
+    """
     return end_date - timedelta(days=7 * weeks - 1), end_date
 
 
@@ -65,6 +71,9 @@ def _fetch_week_alerts(engine: Engine, start: date, end: date) -> list[dict]:
 
 
 def weekly_report(engine: Engine, end_date: date, weeks: int = 1) -> dict:
+    """Report over a rolling `weeks * 7`-day trailing window ending on `end_date` (inclusive),
+    in IST dates — see `_week_bounds`. Not an ISO Monday-start calendar week.
+    """
     start, end = _week_bounds(end_date, weeks)
     trades = _fetch_week_trades(engine, start, end)
     taken = [t for t in trades if t["taken_by_user"]]

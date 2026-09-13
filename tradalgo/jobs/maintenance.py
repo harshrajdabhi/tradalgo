@@ -1,4 +1,5 @@
 """Daily hardening chores: token-expiry reminder, log rotation, old-data pruning."""
+import shutil
 from datetime import timedelta
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from tradalgo.clock import Clock, to_ist
 from tradalgo.config import Settings
 from tradalgo.data.fyers_auth import refresh_token_expiry
 from tradalgo.notify.sender import enqueue_text_alert
-from tradalgo.storage.schema import backtest_runs, decisions, health_events, signals
+from tradalgo.storage.schema import backtest_runs, backtest_trades, decisions, health_events, signals
 
 PRUNABLE_BACKTEST_STATUSES = ("failed", "cancelled")
 BACKTEST_ARTIFACT_KEEP_DAYS = 30
@@ -48,6 +49,12 @@ def _numbered(path: Path, n: int) -> Path:
 
 
 def rotate_logs(log_dir: Path, max_bytes: int = 5_000_000, keep: int = 5) -> list[Path]:
+    """Copy-then-truncate rotation: launchd keeps StandardOutPath/StandardErrorPath open in
+    O_APPEND mode for the life of the job, so renaming file.log out from under it would leave
+    the writer appending into the renamed generation forever. Truncating file.log in place
+    (after copying its content to .1) keeps the writer's fd valid and its next write lands at
+    the new (zero) offset.
+    """
     log_dir = Path(log_dir)
     if not log_dir.exists():
         return []
@@ -64,15 +71,18 @@ def rotate_logs(log_dir: Path, max_bytes: int = 5_000_000, keep: int = 5) -> lis
             if src.exists():
                 src.rename(_numbered(path, n + 1))
         dest = _numbered(path, 1)
-        path.rename(dest)
+        shutil.copyfile(path, dest)
+        with open(path, "r+b") as f:
+            f.truncate(0)
         rotated.append(dest)
     return rotated
 
 
-def prune_old_data(engine: Engine, clock: Clock, keep_days: int = 365) -> dict:
+def prune_old_data(engine: Engine, clock: Clock, keep_days: int = 365,
+                   backtest_artifact_keep_days: int = BACKTEST_ARTIFACT_KEEP_DAYS) -> dict:
     now = clock.now()
     health_cutoff = to_ist(now - timedelta(days=keep_days)).isoformat()
-    backtest_cutoff = to_ist(now - timedelta(days=BACKTEST_ARTIFACT_KEEP_DAYS)).isoformat()
+    backtest_cutoff = to_ist(now - timedelta(days=backtest_artifact_keep_days)).isoformat()
 
     with engine.begin() as conn:
         run_ids = [
@@ -91,8 +101,16 @@ def prune_old_data(engine: Engine, clock: Clock, keep_days: int = 365) -> dict:
                 ).all()
             ]
 
+        backtest_trades_deleted = 0
         decisions_deleted = 0
         signals_deleted = 0
+        if run_ids:
+            # FK-safe order: backtest_trades (written mid-run, including for runs later
+            # cancelled) -> decisions -> signals. backtest_runs rows themselves are kept
+            # as the audit record of the attempt.
+            backtest_trades_deleted = conn.execute(
+                delete(backtest_trades).where(backtest_trades.c.backtest_run_id.in_(run_ids))
+            ).rowcount
         if signal_ids:
             decisions_deleted = conn.execute(
                 delete(decisions).where(decisions.c.signal_id.in_(signal_ids))
@@ -109,6 +127,7 @@ def prune_old_data(engine: Engine, clock: Clock, keep_days: int = 365) -> dict:
         "health_events_deleted": health_deleted,
         "signals_deleted": signals_deleted,
         "decisions_deleted": decisions_deleted,
+        "backtest_trades_deleted": backtest_trades_deleted,
         "backtest_runs_pruned_from": len(run_ids),
     }
 
