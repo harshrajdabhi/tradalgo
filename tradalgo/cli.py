@@ -483,6 +483,31 @@ def cmd_backtest(settings, args) -> int:
     return 0
 
 
+def cmd_diagnose(settings, args) -> int:
+    from tradalgo.backtest.diagnostics import diagnose, load_run, render_markdown
+
+    engine = make_engine(settings.paths.db_path)
+    try:
+        run = load_run(engine, args.run_id)
+    except ValueError as exc:
+        print(f"diagnose failed: {exc}", file=sys.stderr)
+        return 1
+    if run.trades.empty:
+        print(f"backtest run {args.run_id} has no trades; nothing to diagnose", file=sys.stderr)
+        return 1
+
+    report = diagnose(run)
+    markdown = render_markdown(report)
+    print(markdown)
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"diagnostics-run{args.run_id}.md"
+    out_path.write_text(markdown)
+    print(f"wrote {out_path}")
+    return 0
+
+
 def cmd_worker(settings, args) -> int:
     import time as time_module
 
@@ -647,6 +672,10 @@ def main(argv: list[str] | None = None) -> int:
     backtest.add_argument("--max-risk-pct", type=float, default=None)   # defaults to settings.capital
     backtest.add_argument("--capital", type=float, default=None)
 
+    diagnose = sub.add_parser("diagnose", help="backtest diagnostics report (evidence for tuning)")
+    diagnose.add_argument("--run-id", dest="run_id", type=int, required=True)
+    diagnose.add_argument("--out", default="data/reports")
+
     sub.add_parser("worker", help="always-on job worker: backtests, telegram sender/poller, maintenance")
 
     report = sub.add_parser("report", help="weekly performance and live-vs-backtest report")
@@ -666,7 +695,7 @@ def main(argv: list[str] | None = None) -> int:
         "init": cmd_init, "login": cmd_login, "backfill": cmd_backfill,
         "screen": cmd_screen, "preopen": cmd_preopen, "dashboard": cmd_dashboard,
         "install-launchd": cmd_install_launchd, "session": cmd_session, "ci-cycle": cmd_ci_cycle,
-        "backtest": cmd_backtest, "worker": cmd_worker, "report": cmd_report,
+        "backtest": cmd_backtest, "worker": cmd_worker, "report": cmd_report, "diagnose": cmd_diagnose,
     }
     return handlers[args.command](load_settings(args.config), args)
 
