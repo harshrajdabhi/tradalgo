@@ -1,0 +1,102 @@
+"""CycleSink for the live session: everything goes to SQLite; Telegram alerts are only queued, never sent here.
+
+Stateless over the DB (trade -> signal -> entry alert -> user action) so a restarted session sees the same truth.
+"""
+import json
+from typing import Callable
+
+from sqlalchemy import Engine, insert, select, update
+
+from tradalgo.clock import Clock, to_ist
+from tradalgo.engine.events import PositionEvent
+from tradalgo.notify.sender import enqueue_entry_alert, enqueue_event_alert
+from tradalgo.risk.plan import TradePlan
+from tradalgo.storage.schema import alerts, decisions, paper_trades, signals, user_actions
+
+COST_RUPEES = 50.0
+
+
+class LiveSink:
+    def __init__(self, engine: Engine, clock: Clock, degraded_fn: Callable[[], bool], alerts_enabled: bool,
+                 cost_rupees: float = COST_RUPEES):
+        self.engine, self.clock, self.degraded_fn = engine, clock, degraded_fn
+        self.alerts_enabled, self.cost_rupees = alerts_enabled, cost_rupees
+
+    def record_signal(self, signal) -> int:
+        with self.engine.begin() as conn:
+            return conn.execute(insert(signals).values(
+                ts=to_ist(signal.ts).isoformat(), symbol=signal.symbol, strategy=signal.strategy,
+                direction=signal.direction, regime=signal.regime.value, market_regime=signal.market_regime.value,
+                entry=signal.entry, stop_loss=signal.stop_loss, target_2r=signal.target(2),
+                target_3r=signal.target(3), features_json=json.dumps(signal.features, default=str, sort_keys=True),
+                mode="live",
+            )).inserted_primary_key[0]
+
+    def record_decision(self, signal_id: int, decision) -> None:
+        if isinstance(decision, TradePlan):
+            values = dict(accepted=1, qty=decision.qty, leverage_used=decision.leverage_used,
+                          risk_rupees=decision.risk_rupees, est_cost=decision.est_cost,
+                          expected_value_r=decision.expected_value_r, room_to_target_r=decision.room_to_level_r)
+        else:
+            values = dict(accepted=0, rejection_reason=decision.reason)
+        with self.engine.begin() as conn:
+            conn.execute(insert(decisions).values(signal_id=signal_id, **values))
+
+    def accept(self, plan: TradePlan, signal_id: int) -> int:
+        with self.engine.begin() as conn:
+            trade_id = conn.execute(insert(paper_trades).values(
+                signal_id=signal_id, taken_by_user=0, entry_ts=to_ist(plan.signal.ts).isoformat(),
+                entry_price=plan.signal.entry, qty=plan.qty,
+            )).inserted_primary_key[0]
+        if self.alerts_enabled:
+            enqueue_entry_alert(self.engine, plan, signal_id, self.degraded_fn(), self.clock.now())
+        return trade_id
+
+    def emit_event(self, event: PositionEvent, taken: bool) -> None:
+        if event.kind != "trail_update":
+            self._record_exit_leg(event)
+        if taken and self.alerts_enabled:
+            enqueue_event_alert(self.engine, event, self.clock.now())
+
+    def _record_exit_leg(self, event: PositionEvent) -> None:
+        with self.engine.begin() as conn:
+            t = conn.execute(
+                select(paper_trades.c.qty, paper_trades.c.gross_r, signals.c.entry, signals.c.stop_loss)
+                .join(signals, signals.c.id == paper_trades.c.signal_id)
+                .where(paper_trades.c.id == event.trade_id)
+            ).mappings().one()
+            gross = (t["gross_r"] or 0.0) + event.r_multiple * event.qty / t["qty"]
+            ts = to_ist(event.ts).isoformat()
+            values = {"gross_r": gross}
+            # the partial is always the first exit leg, so it closes the trade only when it covers all qty
+            closes = event.kind != "partial_exit" or event.qty >= t["qty"]
+            if event.kind == "partial_exit":
+                values.update(partial_exit_ts=ts, partial_exit_price=event.price)
+            if closes:
+                risk_rupees = t["qty"] * abs(t["entry"] - t["stop_loss"])
+                values.update(exit_ts=ts, exit_price=event.price, exit_reason=event.kind,
+                              net_r=gross - self.cost_rupees / risk_rupees)
+            conn.execute(update(paper_trades).where(paper_trades.c.id == event.trade_id).values(**values))
+
+    def _taken_query(self):
+        return (select(user_actions.c.id, user_actions.c.action, paper_trades.c.id.label("trade_id"))
+                .join(alerts, alerts.c.id == user_actions.c.alert_id)
+                .join(paper_trades, paper_trades.c.signal_id == alerts.c.signal_id)
+                .where(alerts.c.alert_type == "entry"))
+
+    def is_taken(self, trade_id: int) -> bool:
+        with self.engine.begin() as conn:
+            taken = conn.execute(self._taken_query().where(
+                paper_trades.c.id == trade_id, user_actions.c.action == "taken").limit(1)).first() is not None
+            if taken:
+                conn.execute(update(paper_trades).where(paper_trades.c.id == trade_id).values(taken_by_user=1))
+        return taken
+
+    def newly_taken_trade_ids(self, since_id: int) -> tuple[list[int], int]:
+        with self.engine.begin() as conn:
+            found = conn.execute(self._taken_query().where(user_actions.c.id > since_id)
+                                 .order_by(user_actions.c.id)).mappings().all()
+            ids = [r["trade_id"] for r in found if r["action"] == "taken"]
+            if ids:
+                conn.execute(update(paper_trades).where(paper_trades.c.id.in_(ids)).values(taken_by_user=1))
+        return ids, max((r["id"] for r in found), default=since_id)
