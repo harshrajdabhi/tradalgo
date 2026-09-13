@@ -74,6 +74,8 @@ capped at `capital.max_leverage` regardless of what the file says.
 
 1. **07:00** `tradalgo screen` — ranks the universe on end-of-day data, saves the shortlist, sends the
    Telegram shortlist message. Safe to re-run; it skips a day that already succeeded unless `--force`.
+   Add `--test` to try it on a weekend/holiday: instead of skipping, it screens using the last actual
+   trading day's data (no Telegram alert is sent, so it never spams your chat with a stale shortlist).
 2. **09:08** `tradalgo preopen` — annotates the shortlist with the actual pre-open gap and demotes picks
    where the gap has used up the expected move. Never adds new symbols. Skipped (with a warning) if FYERS
    quotes are unavailable — yfinance has no pre-open data.

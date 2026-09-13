@@ -52,6 +52,45 @@ def test_screen_skips_on_non_trading_day(tmp_path, raw_config, monkeypatch, caps
     assert "not a trading day" in capsys.readouterr().out
 
 
+def test_screen_test_flag_uses_last_trading_day_on_a_non_trading_day(tmp_path, raw_config, monkeypatch):
+    cfg_path, settings, engine = _setup(tmp_path, raw_config, monkeypatch)
+    monkeypatch.setattr(cli, "build_screen_provider", lambda *a, **k: FakeCandleProvider())
+    seen_dates = []
+
+    class Pick:
+        symbol, direction, composite_score, reasons = "SBIN", "long", 88.0, ["strong trend"]
+
+    def fake_run_screen(settings, engine, daily, index_daily, universe, trade_date, now, **kw):
+        seen_dates.append(trade_date)
+        return [Pick()]
+
+    monkeypatch.setattr(cli, "run_screen", fake_run_screen)
+    # 2026-09-13 is a Sunday; the last trading day before it is Friday 2026-09-11.
+    assert cli.main(["--config", str(cfg_path), "screen", "--date", "2026-09-13", "--test"]) == 0
+    assert seen_dates == [date(2026, 9, 11)]
+
+    with engine.connect() as conn:
+        rows = conn.execute(select(alerts.c.dedup_key)).all()
+    assert rows == []  # --test never sends a Telegram alert
+
+
+def test_screen_test_flag_is_a_noop_on_an_actual_trading_day(tmp_path, raw_config, monkeypatch):
+    cfg_path, settings, engine = _setup(tmp_path, raw_config, monkeypatch)
+    monkeypatch.setattr(cli, "build_screen_provider", lambda *a, **k: FakeCandleProvider())
+    seen_dates = []
+
+    class Pick:
+        symbol, direction, composite_score, reasons = "SBIN", "long", 88.0, ["strong trend"]
+
+    def fake_run_screen(settings, engine, daily, index_daily, universe, trade_date, now, **kw):
+        seen_dates.append(trade_date)
+        return [Pick()]
+
+    monkeypatch.setattr(cli, "run_screen", fake_run_screen)
+    assert cli.main(["--config", str(cfg_path), "screen", "--date", "2026-09-14", "--test"]) == 0
+    assert seen_dates == [date(2026, 9, 14)]
+
+
 def test_screen_skips_if_already_succeeded_unless_forced(tmp_path, raw_config, monkeypatch, capsys):
     cfg_path, settings, engine = _setup(tmp_path, raw_config, monkeypatch)
     start_id = start_job_run(engine, "screen", datetime(2026, 9, 14, tzinfo=IST))

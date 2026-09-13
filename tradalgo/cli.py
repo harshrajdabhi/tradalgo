@@ -86,6 +86,14 @@ def _resolve_trade_date(args, clock) -> date:
     return date.fromisoformat(args.date) if args.date else clock.now().date()
 
 
+def _last_trading_day(calendar, d: date, max_lookback: int = 14) -> date:
+    for _ in range(max_lookback):
+        d -= timedelta(days=1)
+        if calendar.is_trading_day(d):
+            return d
+    raise ValueError(f"no trading day found within {max_lookback} days before {d}")
+
+
 def _record_health_event(engine, now, component: str, message: str) -> None:
     print(f"warning: {message}", file=sys.stderr)
     with engine.begin() as conn:
@@ -136,9 +144,14 @@ def cmd_screen(settings, args) -> int:
 
     calendar = MarketCalendar(settings.market, load_holidays(settings.paths.static_dir, trade_date.year))
     if not calendar.is_trading_day(trade_date):
-        print(f"{trade_date} is not a trading day; skipping screen")
-        return 0
-    if not args.force and has_job_succeeded_on(engine, "screen", trade_date):
+        if not args.test:
+            print(f"{trade_date} is not a trading day; skipping screen")
+            return 0
+        requested = trade_date
+        trade_date = _last_trading_day(calendar, trade_date)
+        print(f"--test: {requested} is not a trading day; screening as of the last trading day "
+              f"{trade_date} instead (no Telegram alert will be sent)")
+    if not args.test and not args.force and has_job_succeeded_on(engine, "screen", trade_date):
         print(f"screen already succeeded for {trade_date}; use --force to rerun")
         return 0
 
@@ -177,7 +190,7 @@ def cmd_screen(settings, args) -> int:
     for rank, p in enumerate(picks, 1):
         print(f"{rank}. {p.symbol} ({p.direction}) score={p.composite_score:.1f}: {'; '.join(p.reasons)}")
 
-    if settings.telegram.enabled and picks:
+    if settings.telegram.enabled and picks and not args.test:
         rows = [{"rank": i, "symbol": p.symbol, "direction": p.direction,
                 "composite_score": p.composite_score, "reasons": "; ".join(p.reasons)}
                 for i, p in enumerate(picks, 1)]
@@ -611,6 +624,9 @@ def main(argv: list[str] | None = None) -> int:
     screen = sub.add_parser("screen", help="07:00 pre-market screener")
     screen.add_argument("--date", default=None)
     screen.add_argument("--force", action="store_true")
+    screen.add_argument("--test", action="store_true",
+                        help="if the resolved date isn't a trading day, screen using the last trading "
+                             "day's data instead of skipping; never sends a Telegram alert")
 
     preopen = sub.add_parser("preopen", help="09:08 pre-open gap annotation")
     preopen.add_argument("--date", default=None)
