@@ -53,8 +53,7 @@ def _render_now_strip() -> None:
         kill_switch_on=kill_on, failed_alerts=failed, awaiting_alerts=awaiting,
         open_trades=open_trades, next_check=next_check,
     )
-    css_class = "now-strip now-strip--quiet" if state.quiet else "now-strip"
-    st.markdown(f'<div class="{css_class}">{state.headline}</div>', unsafe_allow_html=True)
+    st.markdown(theme.render_now_strip_html(state), unsafe_allow_html=True)
 
 
 @st.fragment(run_every=15)

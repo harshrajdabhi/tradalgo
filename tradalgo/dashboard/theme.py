@@ -1,19 +1,31 @@
 """Visual identity tokens: colors, the CSS injection helper, the plotly template,
 and the pure "Now" strip priority logic. No data queries here.
 """
+import html as _html
+import re
 from dataclasses import dataclass
 
 import plotly.graph_objects as go
 import streamlit as st
 
 # Named tokens. Cool neutral paper desk, not the near-black/neon default trading-app look.
-PAPER = "#F3F1EC"        # page background
-INK = "#16233D"          # primary text, deep navy
-INK_MUTED = "#55617A"    # secondary text / axis labels
-LINE = "#D8D9D3"         # hairline borders, dividers, muted grid
-GAIN = "#2F6D4F"         # muted green, ONLY for P&L/R numbers that are positive
-LOSS = "#8C3B34"         # muted red, ONLY for P&L/R numbers that are negative
-ACTION = "#B4750F"       # amber, ONLY for "needs your action" states
+# Contrast ratios below are computed against the WCAG relative-luminance formula;
+# see dashboard-design-report.md "Fix round 1" for the full table.
+PAPER = "#EEF1F4"        # page background: a genuinely cool blue-grey, not warm cream
+PANEL = "#E4E8EC"        # secondary background (sidebar etc.), a slightly darker cool tone of PAPER
+INK = "#16233D"          # primary text, deep navy — 13.8:1 on PAPER
+INK_MUTED = "#55617A"    # secondary text / axis labels — 5.49:1 on PAPER (passes AA text 4.5:1)
+LINE = "#D8D9D3"         # hairline borders, dividers, muted grid (decorative, not text)
+GAIN = "#2F6D4F"         # muted green, ONLY for P&L/R numbers that are positive — 5.41:1 on PAPER
+LOSS = "#8C3B34"         # muted red, ONLY for P&L/R numbers that are negative — 6.64:1 on PAPER
+ACTION = "#B4750F"       # amber, ONLY for "needs your action" states — 3.37:1 on PAPER (UI/stroke use only, never body text)
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _plain_text(value: str) -> str:
+    """Strip any HTML tags from DB-sourced text (alert bodies carry Telegram formatting tags)."""
+    return _TAG_RE.sub("", value or "").strip()
 
 FONT_STACK = '"Public Sans", -apple-system, "Segoe UI", sans-serif'
 
@@ -93,14 +105,16 @@ def now_strip_state(*, kill_switch_on: bool, failed_alerts: list[dict],
     if failed_alerts:
         a = failed_alerts[0]
         extra = f", and {len(failed_alerts) - 1} more" if len(failed_alerts) > 1 else ""
-        return NowState(f"Alert for {a['symbol']} failed to send ({a.get('last_error', 'unknown error')}){extra}. "
+        last_error = _plain_text(a.get("last_error") or "unknown error")
+        return NowState(f"Alert for {a['symbol']} failed to send ({last_error}){extra}. "
                          "Resend it from the Telegram page.", quiet=False)
 
     if awaiting_alerts:
         a = awaiting_alerts[0]
         extra = f", and {len(awaiting_alerts) - 1} more waiting" if len(awaiting_alerts) > 1 else ""
+        text = _plain_text(a["text"])
         return NowState(
-            f"{a['symbol']} alert is awaiting your reply: {a['text']} (valid until {a['valid_until']}){extra}.",
+            f"{a['symbol']} alert is awaiting your reply: {text} (valid until {a['valid_until']}){extra}.",
             quiet=False,
         )
 
@@ -110,3 +124,13 @@ def now_strip_state(*, kill_switch_on: bool, failed_alerts: list[dict],
         return NowState(f"{t['symbol']} is open from {t['entry_ts']} and still needs an exit{extra}.", quiet=False)
 
     return NowState(f"No action needed. Next check at {next_check}.", quiet=True)
+
+
+def render_now_strip_html(state: NowState) -> str:
+    """Build the Now strip's HTML, escaping the dynamic headline so DB-sourced text
+    (alert bodies, Telegram error messages) can never inject markup. Only the static
+    wrapper markup is unescaped; the content is always html.escape()'d text.
+    """
+    css_class = "now-strip now-strip--quiet" if state.quiet else "now-strip"
+    safe_headline = _html.escape(state.headline)
+    return f'<div class="{css_class}">{safe_headline}</div>'

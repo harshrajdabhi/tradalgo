@@ -16,7 +16,14 @@ def _session_vwap(candles: pd.DataFrame) -> pd.Series:
 
 def candlestick_with_levels(candles: pd.DataFrame, entry: float | None = None,
                              stop_loss: float | None = None, target_2r: float | None = None,
-                             target_3r: float | None = None, title: str = "") -> go.Figure:
+                             target_3r: float | None = None, title: str = "",
+                             awaiting_reply: bool = False) -> go.Figure:
+    """Draw the candles with entry/stop/2R/3R reference lines.
+
+    Amber (theme.ACTION) is reserved for "needs your action": it is only used here when
+    `awaiting_reply` is True, i.e. this signal's entry alert is still waiting on the user's
+    reply. Otherwise the levels are quiet ink tones, distinguished by line style, not color.
+    """
     fig = go.Figure()
     if not candles.empty:
         fig.add_trace(go.Candlestick(
@@ -27,9 +34,14 @@ def candlestick_with_levels(candles: pd.DataFrame, entry: float | None = None,
         if candles["volume"].sum() > 0:
             fig.add_trace(go.Scatter(x=candles.index, y=_session_vwap(candles), name="VWAP",
                                       line=dict(color=theme.INK_MUTED)))
-    for value, name in ((entry, "entry"), (stop_loss, "stop"), (target_2r, "2R"), (target_3r, "3R")):
+    primary = theme.ACTION if awaiting_reply else theme.INK
+    secondary = theme.ACTION if awaiting_reply else theme.INK_MUTED
+    for value, name, color, dash in (
+        (entry, "entry", primary, "solid"), (stop_loss, "stop", primary, "dash"),
+        (target_2r, "2R", secondary, "dot"), (target_3r, "3R", secondary, "dot"),
+    ):
         if value is not None:
-            fig.add_hline(y=value, line_dash="dot", line_color=theme.ACTION,
+            fig.add_hline(y=value, line_dash=dash, line_color=color,
                           annotation_text=name, annotation_position="right")
     fig.update_layout(template=_TEMPLATE, title=title, xaxis_rangeslider_visible=False, height=450)
     return fig
