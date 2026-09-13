@@ -75,7 +75,7 @@ New, added for v2 surfaces (Backtests live view, replay, chart lines). Named, no
 | Token | Hex | Role | Contrast on paper |
 |---|---|---|---|
 | `vwap` | `#5B7C99` | VWAP line on candle charts | 3.87:1 (line/graphic use, ≥3:1) |
-| `accent-cool` | `#2E5C8A` | Neutral chart accent (equity curve line, non-P&L series) — distinct from ink so it doesn't read as body text color reused | 6.02:1 |
+| `accent-cool` | `#2E5C8A` | Neutral chart accent (equity curve line, non-P&L series) — distinct from ink so it doesn't read as body text color reused | 6.15:1 |
 
 Chart series reuse the semantic set rather than invent a rainbow:
 - Candle up → `gain`, candle down → `loss` (same meaning as everywhere else: green/red is reserved for direction and P&L, never used for anything neutral).
@@ -227,7 +227,7 @@ The run detail is a single page with `MuiTabs`: **Live** (default while running)
 - **Fill rate** → a single large percentage with a thin ring, next to "missed entries" count as plain text underneath (not a second chart for one number).
 - **Rejections** → a compact list, grouped by reason, count only — expandable to the raw rows on click for the rare time the raw list is needed.
 
-Components (Diagnostics tab): gate verdict = a `Chip` (`color="success"|"error"`, filled — the one filled chip usage, deliberately, since this is the page's bold element per §3.4) with the reason as adjoining `Typography`. By-hour and MFE-bucket visuals = `@mui/x-charts` `BarChart`. By-exit-reason = `@mui/x-charts` stacked `BarChart` (horizontal). Fill rate ring = MUI `CircularProgress` (determinate) with the percentage as centered `Typography`, not a `@mui/x-charts` gauge (community edition has no gauge component — see Dependencies). Rejections list = `List` with `Accordion` per reason group for the expand-to-raw-rows behavior.
+Components (Diagnostics tab): gate verdict = a `Chip` (`color="success"|"error"`, filled — the one filled chip usage, deliberately, since this is the page's bold element per §3.4) with the reason as adjoining `Typography`. By-hour and MFE-bucket visuals = `@mui/x-charts` `BarChart`. By-exit-reason = `@mui/x-charts` stacked `BarChart` (horizontal). Fill rate ring = MUI `CircularProgress` (determinate) with the percentage as centered `Typography` — a deliberate lighter-weight choice over `@mui/x-charts`' `Gauge` (which is available in the community edition; see §8) for a single unlabeled number. Rejections list = `List` with `Accordion` per reason group for the expand-to-raw-rows behavior.
 
 ### 4b (deep) — Trade replay
 
@@ -359,4 +359,10 @@ Chart library: TradingView `lightweight-charts` for every candle view (Positions
 | `@tanstack/react-query` | ^5 | MIT | Polling/caching for every endpoint in §7 |
 | `react-router-dom` | ^6 | MIT | Routing across the nine pages in §2 |
 
-**Community-edition boundary (no Pro/Premium, no commercial license):** `@mui/x-data-grid` community supports sorting, filtering, column show/hide, and CSV export (`GridToolbar`'s built-in export) — everything the Journal/Trades/Sweeps grids need — but not row grouping/pivoting or the pro-only Excel export; not needed here so no Pro tier is required. `@mui/x-charts` community covers line/bar/scatter (equity curve, histograms, MFE scatter) but has **no gauge/heatmap component in community** — the fill-rate "ring" in §4c deliberately uses plain MUI `CircularProgress` instead of an `@mui/x-charts` gauge for exactly this reason, and no heatmap visualization is proposed anywhere in this plan. If a future page wants row grouping or a gauge, that's the trigger to revisit an MUI X Pro license — not assumed here.
+## Revision 1 (fix round 1)
+
+- Corrected §8's Community-edition claim: `@mui/x-charts` Community **does** include `Gauge` (Pro-only pieces are Heatmap, Radar, Funnel, and zoom/export interactions). `CircularProgress` is kept for the fill-rate ring, but now stated as a design preference for a single unlabeled percentage, not a licensing limitation. Updated both the §4c component note and §8.
+- Recomputed every stated WCAG contrast ratio in the doc from hex values (relative-luminance formula). One was off: `accent-cool` on `paper` corrected from 6.02:1 to 6.15:1 (§3.1). All other stated ratios (ink/panel/muted/gain/loss/action on paper, the dark-theme set, vwap) were re-verified and are unchanged.
+- No change made regarding the review's Critical finding on the backtest endpoints — per the controller's ruling, the v2 plan text has been corrected upstream and this document's build notes (§7) already reference the correct endpoint names.
+
+**Community-edition boundary (no Pro/Premium, no commercial license):** `@mui/x-data-grid` community supports sorting, filtering, column show/hide, and CSV export (`GridToolbar`'s built-in export) — everything the Journal/Trades/Sweeps grids need — but not row grouping/pivoting or the pro-only Excel export; not needed here so no Pro tier is required. `@mui/x-charts` community covers line/bar/scatter/pie and **Gauge** (Heatmap, Radar, Funnel, and zoom/export interactions are the Pro-only pieces) — Gauge is available for the fill-rate indicator without a Pro license. The fill-rate ring in §4c still uses plain MUI `CircularProgress` rather than `@mui/x-charts`' `Gauge`: this is a design preference, not a licensing constraint — a single unlabeled percentage doesn't need a full chart component's tick marks/needle styling, and `CircularProgress` keeps that one number visually lighter-weight than the run's actual charts. No heatmap visualization is proposed anywhere in this plan, so the one Pro-gated component in the family is never needed.
