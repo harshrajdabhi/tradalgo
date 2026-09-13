@@ -517,33 +517,42 @@ def cmd_sweep(settings, args) -> int:
         grid = sweep.load_grid(args.grid, args.max_combinations)
         train = (date.fromisoformat(args.train_from), date.fromisoformat(args.train_to))
         test = (date.fromisoformat(args.test_from), date.fromisoformat(args.test_to))
+        sweep.check_split(train, test)
         total, combos = sweep.expand_grid(grid)
         sweep.validate_combos(settings, combos)
     except (OSError, TypeError, ValueError) as exc:
-        print(f"invalid grid: {exc}", file=sys.stderr)
+        print(f"invalid sweep: {exc}", file=sys.stderr)
         return 1
     print(f"grid: {total} combinations, running {len(combos)} on train {train[0]}..{train[1]}, "
           f"top {grid.top_k} on test {test[0]}..{test[1]}")
-    started = time.monotonic()
+    started_at, started = clock_factory().now(), time.monotonic()
+    reports = settings.paths.data_dir / "reports"
+    checkpoint = Path(args.resume) if args.resume else reports / f"sweep-{started_at:%Y%m%d-%H%M%S}.partial.jsonl"
+    print(f"checkpoint: {checkpoint}" + (" (resuming)" if args.resume else ""))
+    base = {}
 
-    def progress(done, steps, phase):
+    def progress(done, steps, phase, peak_rss_mb):
+        base.setdefault("done", done - 1)  # a resumed run starts part-way; ETA uses this session's pace
         elapsed = time.monotonic() - started
-        eta = elapsed / done * (steps - done)
-        print(f"combos {done}/{steps} ({phase}) elapsed {elapsed:.0f}s eta {eta:.0f}s", flush=True)
+        eta = elapsed / (done - base["done"]) * (steps - done)
+        print(f"combos {done}/{steps} ({phase}) elapsed {elapsed:.0f}s eta {eta:.0f}s "
+              f"peak worker RSS {peak_rss_mb:.0f} MB", flush=True)
 
     try:
         result = sweep.run_sweep(settings, grid, train, test, args.workers, settings.paths.data_dir / "candles",
-                                 load_universe(settings.paths.static_dir), progress)
-    except MissingDataError as exc:
+                                 load_universe(settings.paths.static_dir), progress, checkpoint=checkpoint,
+                                 resume=bool(args.resume))
+    except (MissingDataError, OSError, ValueError) as exc:
         print(f"sweep failed: {exc}", file=sys.stderr)
         return 1
-    paths = sweep.write_reports(result, settings, settings.paths.data_dir / "reports", clock_factory().now())
+    paths = sweep.write_reports(result, settings, reports, started_at)
     for c in result.top:
         print(f"#{c.index} score={c.score} train exp={c.train['expectancy_r']} trades={c.train['trades']} | "
               f"test exp={c.test['expectancy_r']} trades={c.test['trades']} overfit={c.overfit} "
               f"gate={'PASS' if c.passes_gate else 'fail'}")
     print(sweep.verdict(result))
-    for p in paths.values():
+    print(f"peak worker RSS: {result.peak_rss_mb} MB")
+    for p in [*paths.values(), checkpoint]:
         print(f"report: {p}")
     return 0
 
@@ -718,12 +727,13 @@ def main(argv: list[str] | None = None) -> int:
 
     sweep_p = sub.add_parser("sweep", help="walk-forward parameter sweep: rank on train, verify on test")
     sweep_p.add_argument("--grid", required=True)
-    sweep_p.add_argument("--train-from", default="2025-10-06")
+    sweep_p.add_argument("--train-from", default="2025-10-15")
     sweep_p.add_argument("--train-to", default="2026-04-30")
     sweep_p.add_argument("--test-from", default="2026-05-01")
     sweep_p.add_argument("--test-to", default="2026-09-11")
     sweep_p.add_argument("--workers", type=int, default=None)
     sweep_p.add_argument("--max-combinations", type=int, default=None)
+    sweep_p.add_argument("--resume", default=None, help="continue from a sweep-<ts>.partial.jsonl checkpoint")
 
     sub.add_parser("worker", help="always-on job worker: backtests, telegram sender/poller, maintenance")
 

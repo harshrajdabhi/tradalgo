@@ -82,9 +82,21 @@ def backtest_shortlist(settings: Settings, daily: dict[str, pd.DataFrame], index
 
 
 class BacktestSink:
+    record_legs = True
+
     def __init__(self, engine: Engine, run_id: int, broker: PaperBroker, frames: dict[str, SymbolFrames]):
         self.engine, self.run_id, self.broker, self.frames = engine, run_id, broker, frames
         self.records: list[dict] = []
+        self._legs: dict[int, list[dict]] = {}      # signal_id -> entry, every PositionEvent, forced close
+        self._trades: dict[int, tuple[int, object]] = {}  # trade_id -> (signal_id, signal)
+
+    def _leg(self, trade_id: int, kind: str, ts, price: float, qty: int, r: float, new_stop=None) -> None:
+        if not self.record_legs or trade_id not in self._trades:
+            return
+        leg = {"kind": kind, "ts": _iso(ts), "price": float(price), "qty": int(qty), "r": float(r)}
+        if new_stop is not None:
+            leg["new_stop"] = float(new_stop)
+        self._legs.setdefault(self._trades[trade_id][0], []).append(leg)
 
     def record_signal(self, signal) -> int:
         with self.engine.begin() as conn:
@@ -114,9 +126,14 @@ class BacktestSink:
         if fill is None:
             self.broker.miss(plan, signal_id, next_open)
             return None
-        return self.broker.open(plan, signal_id, start.to_pydatetime(), fill)
+        trade_id = self.broker.open(plan, signal_id, start.to_pydatetime(), fill)
+        self._trades[trade_id] = (signal_id, plan.signal)
+        self._leg(trade_id, "entry", start.to_pydatetime(), fill, plan.qty, 0.0)
+        return trade_id
 
     def emit_event(self, event, taken: bool) -> None:
+        # the broker only keeps legs that move qty, so trail_update is captured here
+        self._leg(event.trade_id, event.kind, event.ts, event.price, event.qty, event.r_multiple, event.new_stop)
         record = self.broker.on_event(event)
         if record:
             self._store(record)
@@ -139,8 +156,14 @@ class BacktestSink:
             bars = self.frames[self.broker.symbol_of(trade_id)].candles_5m
             today = bars[bars.index.date == day]
             last = today.index[-1]
-            self._store(self.broker.force_close(trade_id, (last + BAR).to_pydatetime(),
-                                                float(today["close"].iloc[-1]), "eod_no_data"))
+            ts, price = (last + BAR).to_pydatetime(), float(today["close"].iloc[-1])
+            record = self.broker.force_close(trade_id, ts, price, "eod_no_data")
+            signal = self._trades[trade_id][1] if trade_id in self._trades else None
+            if signal is not None:
+                sign = 1 if signal.direction == "long" else -1
+                self._leg(trade_id, "eod_no_data", ts, price, record["legs"][-1]["qty"],
+                          sign * (price - signal.entry) / signal.risk_per_share)
+            self._store(record)
 
     def _store(self, r: dict) -> None:
         with self.engine.begin() as conn:
@@ -150,6 +173,7 @@ class BacktestSink:
                 entry_ts=_iso(r["entry_ts"]), entry_price=r["entry_price"], exit_ts=_iso(r["exit_ts"]),
                 exit_price=r["exit_price"], exit_reason=r["exit_reason"], qty=r["qty"],
                 mfe_r=r["mfe_r"], mae_r=r["mae_r"], gross_r=r["gross_r"], net_r=r["net_r"],
+                legs_json=json.dumps(legs) if (legs := self._legs.pop(r["signal_id"], None)) else None,
             ))
         self.records.append(r)
 

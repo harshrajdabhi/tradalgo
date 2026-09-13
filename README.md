@@ -178,6 +178,20 @@ Backtest and paper-trade net R subtract modeled FYERS equity-intraday charges fr
 
 Verify the rates against https://fyers.in/charges before you trust backtest results.
 
+## Parameter sweep
+
+`tradalgo sweep --grid grid.example.yaml` runs a walk-forward sweep:
+- ranks override combinations on the train period only;
+- re-runs the top K on the out-of-sample test period;
+- writes `data/reports/sweep-<ts>.md`, `.json` and, if a combination passes the gate, `sweep-<ts>-recommended.yaml`.
+
+It never edits `config.yaml` and writes nothing to the database.
+
+- **Default split:** train 2025-10-15 → 2026-04-30, test 2026-05-01 → 2026-09-11 (they must not overlap). The cache needs 20 prior 5m sessions before the train start, and `data_static/nse_holidays_<year>.yaml` for every year covered. A missing cached day stops the sweep with a `tradalgo backfill` hint instead of being skipped.
+- **Memory:** each worker preloads all daily and 5m candles, about **250–350 MB peak RSS per worker** on the Nifty 100 cache (measured 242 MB after preload, 330 MB after a real run), so plan for roughly 1.5 GB with 4 workers. Default workers are `min(cpu_count - 1, 4)`. The progress line and the report show the measured peak.
+- **Runtime:** about **6 s per combination per trading day per worker**, almost all in the engine (regime classification, detectors). The default split covers about 230 trading days: every combination on ~140 train days, the top K on ~92 test days. 60 combinations × 4 workers therefore take **several hours** (≈ 60 × 140 × 6 s ÷ 4 ≈ 3.5 h, plus the test phase). Start with `--max-combinations 60`, keep the Mac awake (`caffeinate -i`), and plug it in.
+- **Resume:** every finished combination is appended to `data/reports/sweep-<ts>.partial.jsonl` as it completes. After an interruption, run the same command with `--resume data/reports/sweep-<ts>.partial.jsonl`. It refuses a checkpoint whose grid, seed or split differ, and skips the finished work.
+
 ## Before relying on live alerts
 
 - Verify `data_static/nse_holidays_2026.yaml` (and the current year's file) against the official NSE

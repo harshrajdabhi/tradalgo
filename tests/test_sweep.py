@@ -1,4 +1,5 @@
-from datetime import datetime, time
+import json
+from datetime import date, datetime, time
 
 import pytest
 import yaml
@@ -171,13 +172,15 @@ def test_cli_exit_codes(cli_config, cache_root, tmp_path, monkeypatch, capsys):
     assert "backfill" in capsys.readouterr().err
 
     real = sweep.run_sweep
-    monkeypatch.setattr(sweep, "run_sweep", lambda s, g, train, test, workers, cache_root_, universe_, progress_cb:
-                        real(s, g, train, test, workers, cache_root, SYMBOLS, progress_cb,
-                             classify=fake_classify, detect_all=param_detector))
+    monkeypatch.setattr(sweep, "run_sweep", lambda s, g, train, test, workers, cache_root_, universe_, progress_cb,
+                        **kw: real(s, g, train, test, workers, cache_root, SYMBOLS, progress_cb,
+                                   classify=fake_classify, detect_all=param_detector, **kw))
     assert _cli(cli_config, grid, "--max-combinations", "1") == 0
     out = capsys.readouterr().out
     assert "combos 1/2" in out and "No configuration passes" in out
-    assert len(list((tmp_path / "data" / "reports").glob("sweep-*.md"))) == 1
+    reports = tmp_path / "data" / "reports"
+    assert len(list(reports.glob("sweep-*.md"))) == 1 and len(list(reports.glob("sweep-*.partial.jsonl"))) == 1
+    assert "peak worker RSS" in out
 
 
 def test_missing_data_error_propagates(settings, tmp_path):
@@ -193,3 +196,85 @@ def test_shortlist_cached_per_screener_settings(settings, cache_root, monkeypatc
     _sweep(settings, cache_root, grid)
     assert replay.backtest_shortlist is sweep._ORIGINAL_SHORTLIST
     assert sorted(calls) == [5, 5, 6, 6]  # two train days per distinct screener config
+
+
+def test_default_split_and_2025_holidays(settings):
+    from tradalgo.clock import load_holidays
+    assert sweep.DEFAULT_TRAIN == (date(2025, 10, 15), date(2026, 4, 30))
+    assert sweep.DEFAULT_TEST == (date(2026, 5, 1), date(2026, 9, 11))
+    assert {date(2025, 10, 21), date(2025, 10, 22), date(2025, 12, 25)} <= set(load_holidays(settings.paths.static_dir, 2025))
+
+
+def test_overlapping_split_rejected(settings, cli_config, tmp_path, capsys):
+    with pytest.raises(ValueError, match="overlap"):
+        sweep.check_split((date(2026, 1, 1), date(2026, 5, 1)), (date(2026, 5, 1), date(2026, 6, 1)))
+    with pytest.raises(ValueError, match="overlap"):
+        run_sweep(settings, rvol_grid(), (TRAIN[0], TEST[1]), TEST, 1, "nowhere", SYMBOLS)
+    grid = _grid_file(tmp_path, {"strategies": {"orb": {"params": {"min_rvol": [1.5]}}}})
+    assert cli.main(["--config", str(cli_config), "sweep", "--grid", grid, "--train-from", "2026-01-01",
+                     "--train-to", "2026-05-10", "--test-from", "2026-05-01", "--test-to", "2026-06-01"]) == 1
+    assert "overlap" in capsys.readouterr().err
+
+
+def test_default_workers_capped_at_four(monkeypatch):
+    monkeypatch.setattr(sweep.os, "cpu_count", lambda: 16)
+    assert sweep.default_workers() == 4
+    monkeypatch.setattr(sweep.os, "cpu_count", lambda: 2)
+    assert sweep.default_workers() == 1
+
+
+def _ranking(result):
+    return [(c.index, c.score, c.test, c.overfit, c.passes_gate) for c in result.top]
+
+
+class Interrupt(Exception):
+    pass
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_checkpoint_resume_matches_uninterrupted(settings, cache_root, tmp_path, workers):
+    grid = rvol_grid(top_k=2)
+    full = run_sweep(settings, grid, TRAIN, TEST, workers, cache_root, SYMBOLS, classify=fake_classify,
+                     detect_all=param_detector, checkpoint=tmp_path / "full.partial.jsonl")
+    assert full.peak_rss_mb > 0
+
+    part = tmp_path / "cut.partial.jsonl"
+
+    def stop_after_two(done, total, phase, rss):
+        if done == 2:
+            raise Interrupt
+
+    with pytest.raises(Interrupt):
+        run_sweep(settings, grid, TRAIN, TEST, 1, cache_root, SYMBOLS, stop_after_two, classify=fake_classify,
+                  detect_all=param_detector, checkpoint=part)
+    lines = [json.loads(line) for line in part.read_text().splitlines()]
+    assert lines[0]["type"] == "header" and [e["phase"] for e in lines[1:]] == ["train", "train"]
+
+    seen = []
+    resumed = run_sweep(settings, grid, TRAIN, TEST, workers, cache_root, SYMBOLS,
+                        lambda done, total, phase, rss: seen.append(done), classify=fake_classify,
+                        detect_all=param_detector, checkpoint=part, resume=True)
+    assert seen[0] == 3 and seen[-1] == 5
+    assert _ranking(resumed) == _ranking(full)
+    phases = [json.loads(line)["phase"] for line in part.read_text().splitlines()[1:]]
+    assert phases == ["train"] * 3 + ["test"] * 2
+
+
+def test_resume_rejects_different_grid_or_split(settings, cache_root, tmp_path):
+    part = tmp_path / "x.partial.jsonl"
+    _sweep_kw = dict(classify=fake_classify, detect_all=param_detector)
+    run_sweep(settings, rvol_grid(top_k=1), TRAIN, TEST, 1, cache_root, SYMBOLS, checkpoint=part, **_sweep_kw)
+    with pytest.raises(ValueError, match="does not match"):
+        run_sweep(settings, rvol_grid(top_k=2), TRAIN, TEST, 1, cache_root, SYMBOLS, checkpoint=part, resume=True,
+                  **_sweep_kw)
+    with pytest.raises(ValueError, match="does not match"):
+        run_sweep(settings, rvol_grid(top_k=1), (TRAIN[0], TRAIN[0]), TEST, 1, cache_root, SYMBOLS,
+                  checkpoint=part, resume=True, **_sweep_kw)
+
+
+def test_report_shows_peak_rss(settings, tmp_path):
+    result = _result(True)
+    result.peak_rss_mb = 321.5
+    paths = sweep.write_reports(result, settings, tmp_path, datetime(2026, 9, 14, 10, 0, tzinfo=IST))
+    assert "Peak worker RSS: 321.5 MB" in paths["md"].read_text()
+    assert json.loads(paths["json"].read_text())["peak_rss_mb"] == 321.5

@@ -21,3 +21,12 @@ def make_engine(db_path: str | Path) -> Engine:
 
 def init_db(engine: Engine) -> None:
     metadata.create_all(engine)
+    _add_missing_columns(engine)
+
+
+def _add_missing_columns(engine: Engine) -> None:
+    """create_all never alters existing tables, so columns added later are ALTERed into older databases."""
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(backtest_trades)")}
+        if "legs_json" not in columns:
+            conn.exec_driver_sql("ALTER TABLE backtest_trades ADD COLUMN legs_json TEXT")

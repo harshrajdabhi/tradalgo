@@ -154,6 +154,7 @@ backtest_trades = Table(
     Column("mae_r", Float),
     Column("gross_r", Float, nullable=False),
     Column("net_r", Float, nullable=False),
+    Column("legs_json", Text),
 )
 
 health_events = Table(

@@ -7,6 +7,8 @@ import json
 import math
 import os
 import random
+import resource
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from multiprocessing import get_context
@@ -21,7 +23,7 @@ from tradalgo.data.base import INDEX_SYMBOL, empty_candles
 from tradalgo.data.candle_cache import CandleCache
 from tradalgo.data.universe import Constituent
 
-DEFAULT_TRAIN = (date(2025, 10, 6), date(2026, 4, 30))
+DEFAULT_TRAIN = (date(2025, 10, 15), date(2026, 4, 30))
 DEFAULT_TEST = (date(2026, 5, 1), date(2026, 9, 11))
 OVERFIT_DECAY_R = 0.3
 GATE_MIN_TRADES = 100
@@ -57,6 +59,7 @@ class SweepResult:
     total_combinations: int
     combos: list[ComboResult]
     top: list[ComboResult] = field(default_factory=list)
+    peak_rss_mb: float = 0.0
 
     @property
     def passing(self) -> list[ComboResult]:
@@ -135,6 +138,43 @@ def validate_combos(settings: Settings, combos: list[dict]) -> None:
             raise ValueError(f"invalid grid combination {combo}: {exc}") from exc
 
 
+def check_split(train: tuple[date, date], test: tuple[date, date]) -> None:
+    for name, (start, end) in (("train", train), ("test", test)):
+        if start > end:
+            raise ValueError(f"{name} range {start}..{end} ends before it starts")
+    if train[0] <= test[1] and test[0] <= train[1]:
+        raise ValueError(f"train {train[0]}..{train[1]} and test {test[0]}..{test[1]} overlap")
+
+
+def default_workers() -> int:
+    # each worker holds its own preloaded candles, so cap the fan-out for smaller-RAM machines
+    return max(1, min((os.cpu_count() or 2) - 1, 4))
+
+
+def _peak_rss_mb() -> float:
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(rss / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)  # bytes on macOS, KiB on Linux
+
+
+def _header(grid: Grid, train, test) -> dict:
+    return json.loads(json.dumps({"type": "header", "grid": asdict(grid), "train": list(train), "test": list(test)},
+                                 default=str))
+
+
+def _load_checkpoint(path: Path, header: dict) -> list[dict]:
+    lines = []
+    for line in path.read_text().splitlines():
+        try:
+            lines.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue  # a line cut off by the interruption
+    if not lines or lines[0].get("type") != "header":
+        raise ValueError(f"{path} is not a sweep checkpoint")
+    if lines[0] != header:
+        raise ValueError(f"checkpoint {path} does not match this grid/split")
+    return [entry for entry in lines[1:] if entry.get("type") == "result"]
+
+
 def score(train: dict, grid: Grid) -> float | None:
     if train["trades"] < grid.min_train_trades:
         return None
@@ -169,6 +209,8 @@ def preload(cache_root: Path, symbols: list[str]) -> PreloadedCache:
 
 class MemorySink(BacktestSink):
     """BacktestSink behaviour without any DB writes."""
+
+    record_legs = False
 
     def __init__(self, engine, run_id, broker, frames):
         super().__init__(None, run_id, broker, frames)
@@ -213,16 +255,18 @@ def _params(s: Settings, frm: date, to: date) -> dict:
             "max_risk_pct": s.capital.max_risk_pct, "initial_capital": s.capital.initial_capital}
 
 
-def _run_one(task: tuple[int, dict, date, date]) -> tuple[int, dict]:
+def _run_one(task: tuple[int, dict, date, date]) -> tuple[int, dict, float]:
     index, overrides, frm, to = task
     s = settings_with_overrides(_WORKER["settings"], overrides)
     metrics = run_backtest(s, None, _params(s, frm, to), 0, _WORKER["cache"], _WORKER["universe"],
                            sink_factory=MemorySink, **_WORKER["kwargs"])
     metrics.pop("missed", None)
-    return index, metrics
+    return index, metrics, _peak_rss_mb()
 
 
 def _map(tasks, workers, init_args, on_done):
+    if not tasks:
+        return
     if workers <= 1:
         _init_worker(*init_args)
         try:
@@ -238,34 +282,59 @@ def _map(tasks, workers, init_args, on_done):
 
 def run_sweep(settings: Settings, grid: Grid, train=DEFAULT_TRAIN, test=DEFAULT_TEST, workers: int | None = None,
               cache_root: str | Path = "data/candles", universe: list[Constituent] = (),
-              progress_cb=lambda done, total, phase: None, **backtest_kwargs) -> SweepResult:
-    """backtest_kwargs (classify/detect_all) go to run_backtest and must be picklable when workers > 1."""
+              progress_cb=lambda done, total, phase, peak_rss_mb: None, checkpoint: str | Path | None = None,
+              resume: bool = False, **backtest_kwargs) -> SweepResult:
+    """backtest_kwargs (classify/detect_all) go to run_backtest and must be picklable when workers > 1.
+
+    checkpoint: a JSONL file getting a header line and then one line per finished combination per phase;
+    resume=True reloads it (it must match grid and split), skips finished work and keeps appending.
+    """
+    check_split(train, test)
     total, combos = expand_grid(grid)
     validate_combos(settings, combos)
-    workers = workers if workers is not None else max(1, (os.cpu_count() or 2) - 1)
+    workers = workers if workers is not None else default_workers()
     init_args = (settings, str(cache_root), list(universe), backtest_kwargs)
     results = [ComboResult(i, c, {}) for i, c in enumerate(combos)]
+    header = _header(grid, train, test)
+    finished = _load_checkpoint(Path(checkpoint), header) if resume else []
+    if checkpoint is not None and not resume:
+        Path(checkpoint).parent.mkdir(parents=True, exist_ok=True)
+        Path(checkpoint).write_text(json.dumps(header) + "\n")
+    completed = set()
+    peak = 0.0
+    for entry in finished:
+        setattr(results[entry["index"]], entry["phase"], entry["metrics"])
+        completed.add((entry["phase"], entry["index"]))
+        peak = max(peak, entry.get("peak_rss_mb") or 0.0)
     steps = len(combos) + min(grid.top_k, len(combos))
-    done = 0
+    done = len(finished)
 
     def record(phase):
         def on_done(out):
-            nonlocal done
-            index, metrics = out
+            nonlocal done, peak
+            index, metrics, rss = out
             setattr(results[index], phase, metrics)
+            if checkpoint is not None:
+                with open(checkpoint, "a") as f:
+                    f.write(json.dumps({"type": "result", "phase": phase, "index": index,
+                                        "overrides": results[index].overrides, "metrics": metrics,
+                                        "peak_rss_mb": rss}, default=str) + "\n")
+            peak = max(peak, rss)
             done += 1
-            progress_cb(done, steps, phase)
+            progress_cb(done, steps, phase, peak)
         return on_done
 
-    _map([(c.index, c.overrides, *train) for c in results], workers, init_args, record("train"))
+    todo = [(c.index, c.overrides, *train) for c in results if ("train", c.index) not in completed]
+    _map(todo, workers, init_args, record("train"))
     for c in results:
         c.score = score(c.train, grid)
     top = sorted((c for c in results if c.score is not None), key=lambda c: (-c.score, c.index))[:grid.top_k]
-    _map([(c.index, c.overrides, *test) for c in top], min(workers, max(1, len(top))), init_args, record("test"))
+    todo = [(c.index, c.overrides, *test) for c in top if ("test", c.index) not in completed]
+    _map(todo, min(workers, max(1, len(todo))), init_args, record("test"))
     for c in top:
         c.overfit = is_overfit(c.train, c.test)
         c.passes_gate = passes_gate(settings, c.train, c.test)
-    return SweepResult(grid, tuple(train), tuple(test), total, results, top)
+    return SweepResult(grid, tuple(train), tuple(test), total, results, top, peak)
 
 
 def _flat(tree: dict, prefix: str = "") -> dict:
@@ -299,6 +368,7 @@ def render_markdown(result: SweepResult, settings: Settings) -> str:
         f"{g.min_train_trades}; top_k {g.top_k}; slippage {settings.backtest.slippage_pct}%",
         f"- Gate: test expectancy_r > 0, train+test trades ≥ {GATE_MIN_TRADES}, test maxDD ≤ "
         f"{settings.capital.daily_loss_limit_r * GATE_DD_MULT}R",
+        f"- Peak worker RSS: {result.peak_rss_mb} MB",
         "", "## Grid", "", "```yaml", yaml.safe_dump(g.overrides, sort_keys=True).rstrip(), "```", "",
         "## Top combinations (ranked on train)", "",
         "| # | overrides | train trades | train win | train exp R | train PF | train maxDD | score | "
@@ -334,6 +404,7 @@ def write_reports(result: SweepResult, settings: Settings, out_dir: str | Path, 
     payload = {"generated_at": now.isoformat(), "train": [d.isoformat() for d in result.train],
                "test": [d.isoformat() for d in result.test], "grid": asdict(result.grid),
                "total_combinations": result.total_combinations, "verdict": verdict(result),
+               "peak_rss_mb": result.peak_rss_mb,
                "top": [asdict(c) for c in result.top], "combos": [asdict(c) for c in result.combos]}
     paths["json"].write_text(json.dumps(payload, indent=2, default=str))
     if result.best:
