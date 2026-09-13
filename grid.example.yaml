@@ -1,0 +1,41 @@
+# Walk-forward sweep grid for `tradalgo sweep --grid grid.example.yaml`.
+#
+# overrides: a nested dict mirroring config.yaml. Any leaf may be a list of candidate values; a scalar leaf is
+# applied to every combination. Every combination is validated with settings_with_overrides before anything runs,
+# so a typo fails the whole sweep upfront. Tunable keys: see .superpowers/sdd/2026-09-14-tradalgo-v2/A3-report.md.
+#
+# This first grid follows the run-6 evidence:
+#   - entries after ~11:00 all lost and 10h was weak -> earlier window_end
+#   - hard exits were the only profitable bucket and stops look tight -> wider stop_atr_min, later/no breakeven
+#   - pullback 13 trades at 7.7% win -> disabled; gap/vwap negative -> sweep on/off
+#   - orb is roughly breakeven after costs -> tune rvol and opening-range length first
+# Slippage stays at backtest.slippage_pct from config.yaml (0.05% per order).
+overrides:
+  strategies:
+    orb:
+      window_end: ["10:00", "10:30", "11:00"]
+      params:
+        min_rvol: [1.2, 1.5, 2.0]
+        or_minutes: [15, 30]
+    gap:
+      enabled: [true, false]
+    vwap:
+      enabled: [true, false]
+    pullback:
+      enabled: [false]
+    pdhl:
+      enabled: [false]
+    range_breakout:
+      enabled: [true, false]
+  position_management:
+    stop_atr_min: [0.5, 0.8, 1.0]
+    partial_exit_at_r: [1.5, 2.0]
+    runner_target_r: [3.0]
+    breakeven_after_partial: [true, false]
+
+# The product above is 3*3*2*2*2*1*1*2*3*2*1*2 = 1728; a seeded random sample of max_combinations is run instead.
+max_combinations: 200
+seed: 42
+min_train_trades: 40       # combos with fewer train trades are never ranked
+top_k: 10                  # best train scores re-run on the test period
+drawdown_penalty: 0.02     # score = train expectancy_r - drawdown_penalty * train max_drawdown_r

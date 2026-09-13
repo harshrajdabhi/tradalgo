@@ -177,8 +177,12 @@ class _IntradayCache:
 
 def run_backtest(settings: Settings, engine: Engine, params: dict, run_id: int, cache: CandleCache,
                  universe: list[Constituent], progress_cb=lambda pct: None, cancel_cb=lambda: False, *,
-                 classify=None, detect_all=None, leverage=lambda symbol: None) -> dict:
-    """Known gap vs live: no historical corporate-event blackout or news (no free source), so news is neutral."""
+                 classify=None, detect_all=None, leverage=lambda symbol: None, sink_factory=None) -> dict:
+    """Known gap vs live: no historical corporate-event blackout or news (no free source), so news is neutral.
+
+    sink_factory(engine, run_id, broker, frames) replaces BacktestSink, e.g. the sweep's in-memory sink.
+    """
+    sink_factory = sink_factory or BacktestSink
     s = apply_params(settings, params)
     calendar, days = trading_days(s, date.fromisoformat(params["from"]), date.fromisoformat(params["to"]))
     members = [c for c in universe if params["universe"] == "both" or c.index == params["universe"]]
@@ -207,7 +211,7 @@ def run_backtest(settings: Settings, engine: Engine, params: dict, run_id: int, 
         n = max(deps.history_sessions, deps.regime_history_sessions)
         index_5m = intraday.window(INDEX_SYMBOL, day, n)
         frames = {sym: SymbolFrames(intraday.window(sym, day, n), daily[sym]) for sym in picks}
-        sink = BacktestSink(engine, run_id, broker, frames)
+        sink = sink_factory(engine, run_id, broker, frames)
         state = SessionState.new(day, capital)
         for now in cycle_times(day, s.market):
             sink.feed_bars(now)
