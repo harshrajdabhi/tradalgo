@@ -127,3 +127,26 @@ def test_error_message_escapes_and_includes_component():
     msg = templates.error_message("fyers_provider", "connection <reset>")
     assert "fyers_provider" in msg
     assert "&lt;reset&gt;" in msg
+
+
+def test_entry_message_default_targets_labelled_2r_3r():
+    msg = templates.entry_message(make_plan(), degraded=False)
+    assert "Partial target (2R): 2540.00" in msg and "Runner target (3R): 2560.00" in msg
+
+
+def test_entry_message_labels_targets_with_configured_r():
+    plan = make_plan()
+    plan = TradePlan(**{**plan.__dict__, "target_2r": 2530.0, "target_3r": 2550.0})   # 1.5R / 2.5R
+    msg = templates.entry_message(plan, degraded=False)
+    assert "Partial target (1.5R): 2530.00" in msg and "Runner target (2.5R): 2550.00" in msg
+    assert "2R" not in msg.replace("2.5R", "") and "3R" not in msg
+
+
+def test_position_event_message_partial_uses_actual_r():
+    event = PositionEvent(kind="partial_exit", trade_id=1, symbol="SBIN", strategy="orb", ts=NOW,
+                          price=103.0, qty=6, new_stop=None, r_multiple=1.5)
+    msg = templates.position_event_message(event)
+    assert "partial exit at 1.5R" in msg and "2R" not in msg
+    event = PositionEvent(kind="runner_exit", trade_id=1, symbol="SBIN", strategy="orb", ts=NOW,
+                          price=106.0, qty=4, new_stop=None, r_multiple=3.0)
+    assert "runner exit at 3R" in templates.position_event_message(event)

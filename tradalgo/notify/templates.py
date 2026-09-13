@@ -22,6 +22,11 @@ def _e(value) -> str:
     return html.escape(str(value))
 
 
+def _r_label(r: float) -> str:
+    """1.5 -> '1.5R', 2.0 -> '2R'; rounded to 2 dp so float noise from prices never shows."""
+    return f"{round(r, 2):g}R"
+
+
 def _truncate(text: str, limit: int = TELEGRAM_MAX_LEN) -> str:
     if len(text) <= limit:
         return text
@@ -47,14 +52,18 @@ def entry_message(plan: "TradePlan", degraded: bool) -> str:
     s = plan.signal
     direction_label = "LONG" if s.direction == "long" else "SHORT"
     valid_until_txt = to_ist(plan.valid_until).strftime("%H:%M")
+    # target_2r/target_3r hold the configured partial/runner levels, which need not be 2R/3R
+    partial_r = abs(plan.target_2r - s.entry) / s.risk_per_share
+    runner_r = abs(plan.target_3r - s.entry) / s.risk_per_share
     lines = [
         f"<b>ENTRY — {_e(s.symbol)} {direction_label}</b>",
         f"Strategy: {_e(s.strategy)}",
         f"Trigger/Entry: {plan.signal.entry:.2f}",
         f"Limit band: {plan.limit_low:.2f} – {plan.limit_high:.2f}",
         f"Stop loss / Invalidation: {s.stop_loss:.2f}",
-        f"Target 2R: {plan.target_2r:.2f}   Target 3R: {plan.target_3r:.2f}",
-        f"R:R (to 2R): {abs(plan.target_2r - s.entry) / s.risk_per_share:.2f}",
+        f"Partial target ({_r_label(partial_r)}): {plan.target_2r:.2f}   "
+        f"Runner target ({_r_label(runner_r)}): {plan.target_3r:.2f}",
+        f"R:R (to partial): {partial_r:.2f}",
         f"Qty: {plan.qty}",
         f"Margin required: ₹{plan.margin_required:.2f}   Leverage: {plan.leverage_used:.2f}x",
         f"Risk: ₹{plan.risk_rupees:.2f}   Est. cost: ₹{plan.est_cost:.2f}",
@@ -81,8 +90,8 @@ def position_event_message(event: "PositionEvent") -> str:
         )
     reason = {
         "stop_hit": "stop hit",
-        "partial_exit": "partial exit at 2R",
-        "runner_exit": "runner exit",
+        "partial_exit": f"partial exit at {_r_label(event.r_multiple)}",
+        "runner_exit": f"runner exit at {_r_label(event.r_multiple)}",
         "hard_exit": "hard exit 15:00",
     }.get(event.kind, event.kind)
     return _truncate(
