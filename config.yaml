@@ -42,9 +42,7 @@ strategies:
   range_breakout: {enabled: true, window_start: "09:30", window_end: "14:00"}
 
 position_management:
-  partial_exit_at_r: 2.0
   partial_exit_fraction: 0.6
-  trail_method: swing_structure
 
 backtest:
   slippage_pct: 0.05

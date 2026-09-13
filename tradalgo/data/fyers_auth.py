@@ -33,7 +33,9 @@ def auth_url(app_id: str, secret: str, redirect_uri: str) -> str:
 def _post(post, path: str, payload: dict) -> dict:
     resp = post(f"{API}{path}", json=payload, timeout=15).json()
     if resp.get("s") != "ok":
-        raise AuthError(f"FYERS {path} failed: {resp.get('message', resp)}")
+        # never interpolate the body: /validate-authcode responses carry access_token / refresh_token
+        raise AuthError(f"FYERS {path} failed: "
+                        f"{resp.get('message', f'unexpected response (keys: {sorted(resp)})')}")
     return resp
 
 

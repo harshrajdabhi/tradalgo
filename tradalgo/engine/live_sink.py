@@ -144,11 +144,13 @@ class LiveSink:
                 self._mark_taken(conn, row)
         return row is not None
 
-    def newly_taken_trade_ids(self, since_id: int) -> tuple[list[int], int]:
+    def newly_actioned_trade_ids(self, since_id: int) -> tuple[list[int], list[int], int]:
+        """(taken trade ids, skipped trade ids, new cursor): skipped releases its provisional risk slot."""
         with self.engine.begin() as conn:
             found = conn.execute(self._taken_query().where(user_actions.c.id > since_id)
                                  .order_by(user_actions.c.id)).mappings().all()
             taken = [r for r in found if r["action"] == "taken"]
             for r in taken:
                 self._mark_taken(conn, r)
-        return [r["trade_id"] for r in taken], max((r["id"] for r in found), default=since_id)
+        return ([r["trade_id"] for r in taken], [r["trade_id"] for r in found if r["action"] == "skipped"],
+                max((r["id"] for r in found), default=since_id))

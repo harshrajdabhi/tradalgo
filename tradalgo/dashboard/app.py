@@ -43,8 +43,9 @@ def render_sidebar(settings: Settings) -> None:
     st.sidebar.metric("Market", status)
 
     kill_on = controls.kill_switch_active(settings.paths.data_dir)
-    new_kill_on = st.sidebar.toggle("Stop all alerts", value=kill_on,
-                                    help="On: no alerts go out. Off: alerts resume as normal.")
+    new_kill_on = st.sidebar.toggle(
+        "Stop new entry alerts", value=kill_on,
+        help="On: no new entry alerts. Exit alerts for open trades keep coming. Off: alerts resume as normal.")
     if new_kill_on != kill_on:
         controls.set_kill_switch(settings.paths.data_dir, new_kill_on)
         st.rerun()

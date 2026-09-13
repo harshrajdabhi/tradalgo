@@ -68,17 +68,17 @@ def test_alerts_disabled_still_tracks_trade(engine):
 def test_is_taken_and_newly_taken(engine):
     s, trade_id, _ = open_trade(engine)
     assert not s.is_taken(trade_id)
-    assert s.newly_taken_trade_ids(0) == ([], 0)
+    assert s.newly_actioned_trade_ids(0) == ([], [], 0)
     action_id = tap(engine)
-    assert s.newly_taken_trade_ids(0) == ([trade_id], action_id)
-    assert s.newly_taken_trade_ids(action_id) == ([], action_id)
+    assert s.newly_actioned_trade_ids(0) == ([trade_id], [], action_id)
+    assert s.newly_actioned_trade_ids(action_id) == ([], [], action_id)
     assert s.is_taken(trade_id) and rows(engine, paper_trades)[0]["taken_by_user"] == 1
 
 
-def test_skipped_is_not_taken(engine):
+def test_skipped_is_reported_separately_and_is_not_taken(engine):
     s, trade_id, _ = open_trade(engine)
     action_id = tap(engine, "skipped")
-    assert s.newly_taken_trade_ids(0) == ([], action_id)
+    assert s.newly_actioned_trade_ids(0) == ([], [trade_id], action_id)
     assert not s.is_taken(trade_id)
 
 
@@ -126,7 +126,7 @@ def test_excursions_and_adverse_slippage(engine):
     s, trade_id, _ = open_trade(engine)
     s.record_excursions(trade_id, 1.5, -0.25)
     tap(engine, price=100.2)
-    s.newly_taken_trade_ids(0)
+    s.newly_actioned_trade_ids(0)
     t = rows(engine, paper_trades)[0]
     assert (t["mfe_r"], t["mae_r"]) == (1.5, -0.25) and t["slippage_rupees"] == pytest.approx(20.0)
 
@@ -157,7 +157,7 @@ def test_exit_leg_is_applied_only_once_per_leg(engine):
 def test_button_tap_price_equal_to_entry_is_not_slippage(engine):
     s, trade_id, _ = open_trade(engine)
     tap(engine, price=100.0)   # notify.updates stores the plan entry, not a real fill
-    s.newly_taken_trade_ids(0)
+    s.newly_actioned_trade_ids(0)
     assert rows(engine, paper_trades)[0]["slippage_rupees"] is None
 
 

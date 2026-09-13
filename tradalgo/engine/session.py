@@ -17,7 +17,7 @@ import pandas as pd
 
 from tradalgo.data.base import INDEX_SYMBOL, normalize
 from tradalgo.engine.cycle import (CycleDeps, SessionState, SymbolFrames, _cost_r, open_position, register_taken,
-                                   route_events, run_cycle)
+                                   release_slot, route_events, run_cycle)
 from tradalgo.notify.sender import enqueue_text_alert
 from tradalgo.notify.templates import eod_summary_message
 from tradalgo.notify.updates import process_updates
@@ -133,12 +133,23 @@ class LiveSession:
                   for sym in self.symbols}
         index_5m = five_minute(INDEX_SYMBOL)
         self._track_degraded(now)
-        ids, self._since_action_id = self.sink.newly_taken_trade_ids(self._since_action_id)
-        for trade_id in ids:
+        taken_ids, skipped_ids, self._since_action_id = self.sink.newly_actioned_trade_ids(self._since_action_id)
+        for trade_id in taken_ids:
             if trade_id in self.state.trades:
                 register_taken(self.state, trade_id, self.settings)
+        for trade_id in skipped_ids:
+            if trade_id in self.state.trades:
+                release_slot(self.state, trade_id)
+        self._release_expired_reservations(now)
         run_cycle(self.state, now, frames, index_5m, self.deps, self.sink, check_kill_switch=True)
         self._after_change()
+
+    def _release_expired_reservations(self, now: datetime) -> None:
+        """An entry alert nobody answered before it expired gives its provisional slot back (C2)."""
+        for trade_id in sorted(self.state.reserved_trade_ids):
+            valid_until = self.state.trades.get(trade_id, {}).get("valid_until")
+            if valid_until is None or datetime.fromisoformat(valid_until) < to_ist(now):
+                release_slot(self.state, trade_id)
 
     def _after_change(self) -> None:
         self._persist()

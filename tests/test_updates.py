@@ -153,6 +153,16 @@ def test_kill_command_creates_kill_file_and_health_event(engine, tmp_path):
     assert len(rows) == 1
     assert rows[0]["component"] == "telegram"
     assert rows[0]["level"] == "warning"
+    # I5: the kill switch stops NEW ENTRY alerts only; exits for open trades must keep coming
+    assert client.sent == ["Kill switch on - no new entry alerts. Exit alerts for open trades keep coming."]
+
+
+def test_kill_command_creates_the_data_dir_if_missing(engine, tmp_path):
+    data_dir = tmp_path / "not-created-yet" / "data"
+    batch = [{"update_id": 1, "message": {"chat": {"id": ALLOWED_CHAT}, "text": "/kill"}}]
+    client = FakeTelegramClient([batch])
+    updates.process_updates(engine, client, FixedClock(NOW), 0, data_dir, ALLOWED_CHAT, status_text)
+    assert (data_dir / "KILL").exists() and len(client.sent) == 1
 
 
 def test_resume_command_removes_kill_file(engine, tmp_path):

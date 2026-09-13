@@ -1,3 +1,4 @@
+import os
 from datetime import time
 from pathlib import Path
 from typing import Literal
@@ -65,9 +66,9 @@ class StrategyConfig(BaseModel):
 
 
 class PositionConfig(BaseModel):
-    partial_exit_at_r: float = Field(gt=0)
+    # PositionManager partials at the plan's 2R target and trails on the last risk.trail_bars extreme;
+    # neither is configurable, so no knob for them is offered here.
     partial_exit_fraction: float = Field(gt=0, lt=1)
-    trail_method: Literal["swing_structure", "atr_multiple"]
 
 
 class BacktestConfig(BaseModel):
@@ -164,8 +165,11 @@ def get_secret(name: str) -> str:
 
 
 class KeyringStore:
+    """Secrets from the environment first (CI/CD, e.g. GitHub Actions secrets), else macOS Keychain."""
+
     def get(self, name: str) -> str | None:
-        return keyring.get_password(KEYRING_SERVICE, name)
+        env = os.environ.get(name)
+        return env if env else keyring.get_password(KEYRING_SERVICE, name)
 
     def set(self, name: str, value: str) -> None:
         keyring.set_password(KEYRING_SERVICE, name, value)

@@ -48,6 +48,21 @@ def register_entry(state: DailyRiskState, signal: Signal) -> DailyRiskState:
     )
 
 
+def release_entry(state: DailyRiskState, symbol: str) -> DailyRiskState:
+    """Undo a still-open registration for `symbol` (a provisional slot the user skipped or let expire)."""
+    taken = list(state.taken)
+    open_syms = list(state.open_trade_symbols)
+    for i in range(len(taken) - 1, -1, -1):
+        if taken[i][0] == symbol and not taken[i][2]:
+            del taken[i]
+            break
+    else:
+        return state
+    if symbol in open_syms:
+        open_syms.remove(symbol)
+    return replace(state, trades_taken=max(0, state.trades_taken - 1), open_trade_symbols=open_syms, taken=taken)
+
+
 def register_exit(state: DailyRiskState, symbol: str, net_r: float) -> DailyRiskState:
     taken = list(state.taken)
     for i, (sym, strategy, closed, _) in enumerate(taken):

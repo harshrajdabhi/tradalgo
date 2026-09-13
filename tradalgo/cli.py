@@ -312,6 +312,70 @@ def cmd_session(settings, args) -> int:
     return 0
 
 
+def cmd_ci_cycle(settings, args) -> int:
+    """One 5-minute cycle and exit — for a scheduler that can't hold a long-lived process (e.g. GitHub
+    Actions cron). State is loaded from and saved back to the SQLite DB and the session JSON file, so
+    consecutive runs (even in fresh processes/containers) continue the same trading day. No tick stream:
+    only the 5-minute bar cycle runs, which is what `LiveSession.run_once` already does on its own."""
+    from datetime import time as dt_time
+
+    from tradalgo.engine.live_sink import LiveSink
+    from tradalgo.engine.session import LiveSession, poll_telegram_updates, shortlist_symbols, status_text_for
+    from tradalgo.jobs.backtest_worker import build_telegram_client, run_worker
+
+    clock = clock_factory()
+    store = store_factory()
+    engine = make_engine(settings.paths.db_path)
+    now = clock.now()
+    trade_date = _resolve_trade_date(args, clock)
+    data_dir = settings.paths.data_dir
+
+    calendar = MarketCalendar(settings.market, load_holidays(settings.paths.static_dir, trade_date.year))
+    if not calendar.is_trading_day(trade_date):
+        print(f"{trade_date} is not a trading day; skipping cycle")
+        return 0
+    if not calendar.is_market_open(now):
+        print(f"market is closed at {now.isoformat()}; skipping cycle")
+        return 0
+    if not shortlist_symbols(engine, trade_date):
+        print(f"no shortlist for {trade_date}; run `tradalgo screen` first")
+        return 0
+
+    def on_fallback(message):
+        _record_health_event(engine, now, "data", message)
+
+    provider = build_screen_provider(settings, store, trade_date, on_fallback)
+    cache = CandleCache(data_dir / "candles", provider)
+
+    def sink_factory(degraded_fn):
+        return LiveSink(engine, clock, degraded_fn, settings.telegram.enabled)
+
+    session = LiveSession(settings, engine, clock, provider, cache, sink_factory,
+                          tick_stream_factory=None, state_dir=data_dir / "session")
+    if not session.start(trade_date):
+        print(f"no session today for {trade_date}")
+        return 0
+    if now.time() > dt_time(15, 31):
+        session.finish(now)
+    else:
+        session.run_once(now)
+
+    telegram_client = build_telegram_client(store)
+    if telegram_client is None:
+        _record_health_event(engine, now, "cycle", "Telegram not configured; alerts stay queued")
+    else:
+        try:
+            run_worker(settings, engine, clock, once=True, telegram_client=telegram_client)
+            status_text = status_text_for(engine, clock, data_dir / "session", data_dir)
+            poll_telegram_updates(engine, telegram_client, clock, data_dir, store.get("TELEGRAM_CHAT_ID"),
+                                  status_text, data_dir / "telegram_offset.json")
+        except Exception as exc:
+            _record_health_event(engine, now, "cycle", f"telegram send/poll failed: {exc}")
+
+    print(f"cycle complete for {trade_date} at {now.isoformat()}")
+    return 0
+
+
 def cmd_backtest(settings, args) -> int:
     from tradalgo.dashboard.controls import validate_backtest_params
     from tradalgo.data.universe import load_universe
@@ -325,7 +389,8 @@ def cmd_backtest(settings, args) -> int:
         "from": args.from_date, "to": args.to_date, "universe": args.universe,
         "strategies": args.strategies.split(","), "shortlist_size": args.shortlist_size,
         "slippage_pct": args.slippage_pct if args.slippage_pct is not None else settings.backtest.slippage_pct,
-        "max_risk_pct": args.max_risk_pct, "initial_capital": args.capital,
+        "max_risk_pct": settings.capital.max_risk_pct if args.max_risk_pct is None else args.max_risk_pct,
+        "initial_capital": settings.capital.initial_capital if args.capital is None else args.capital,
     }
     try:
         validate_backtest_params(params)
@@ -478,7 +543,9 @@ def cmd_report(settings, args) -> int:
 
 def cmd_dashboard(settings, args) -> int:
     env = {**os.environ, "TRADALGO_CONFIG": str(Path(args.config).resolve())}
-    cmd = ["streamlit", "run", "tradalgo/dashboard/app.py",
+    # launchd runs this job with no venv on PATH, and from an arbitrary cwd
+    app = Path(__file__).resolve().parent / "dashboard" / "app.py"
+    cmd = [sys.executable, "-m", "streamlit", "run", str(app),
            "--server.address", settings.dashboard.host,
            "--server.port", str(settings.dashboard.port),
            "--server.headless", "true"]
@@ -551,6 +618,9 @@ def main(argv: list[str] | None = None) -> int:
     session = sub.add_parser("session", help="live 5-minute alert session during market hours")
     session.add_argument("--date", default=None)
 
+    ci_cycle = sub.add_parser("ci-cycle", help="one 5-minute cycle then exit (for a cron scheduler, e.g. GitHub Actions)")
+    ci_cycle.add_argument("--date", default=None)
+
     backtest = sub.add_parser("backtest", help="walk-forward strategy backtest")
     backtest.add_argument("--from", dest="from_date", required=True)
     backtest.add_argument("--to", dest="to_date", required=True)
@@ -558,8 +628,8 @@ def main(argv: list[str] | None = None) -> int:
     backtest.add_argument("--strategies", default="orb,gap,vwap,pdhl,pullback,range_breakout")
     backtest.add_argument("--shortlist-size", type=int, default=6)
     backtest.add_argument("--slippage-pct", type=float, default=None)
-    backtest.add_argument("--max-risk-pct", type=float, default=0.02)
-    backtest.add_argument("--capital", type=float, default=20000.0)
+    backtest.add_argument("--max-risk-pct", type=float, default=None)   # defaults to settings.capital
+    backtest.add_argument("--capital", type=float, default=None)
 
     sub.add_parser("worker", help="always-on job worker: backtests, telegram sender/poller, maintenance")
 
@@ -579,8 +649,8 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "init": cmd_init, "login": cmd_login, "backfill": cmd_backfill,
         "screen": cmd_screen, "preopen": cmd_preopen, "dashboard": cmd_dashboard,
-        "install-launchd": cmd_install_launchd, "session": cmd_session, "backtest": cmd_backtest,
-        "worker": cmd_worker, "report": cmd_report,
+        "install-launchd": cmd_install_launchd, "session": cmd_session, "ci-cycle": cmd_ci_cycle,
+        "backtest": cmd_backtest, "worker": cmd_worker, "report": cmd_report,
     }
     return handlers[args.command](load_settings(args.config), args)
 

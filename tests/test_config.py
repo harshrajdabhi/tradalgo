@@ -15,6 +15,8 @@ def test_shipped_config_loads_spec_values():
     assert s.capital.max_trades_per_day == 2
     assert s.screener.shortlist_size == 6
     assert s.position_management.partial_exit_fraction == 0.6
+    # I3: knobs PositionManager ignores must not exist at all
+    assert set(type(s.position_management).model_fields) == {"partial_exit_fraction"}
 
 
 @pytest.mark.parametrize("mutate, message", [

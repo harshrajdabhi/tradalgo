@@ -34,9 +34,6 @@ if current is not None:
         strategy_toggles = {}
         for name, cfg in current["strategies"].items():
             strategy_toggles[name] = st.checkbox(f"{name} enabled", value=bool(cfg["enabled"]))
-        partial_exit_at_r = st.number_input(
-            "Partial exit at R", min_value=0.0,
-            value=float(current["position_management"]["partial_exit_at_r"]))
         save = st.form_submit_button("Save settings")
 
     if save:
@@ -47,8 +44,6 @@ if current is not None:
         new_config["strategies"] = {
             name: dict(cfg, enabled=strategy_toggles[name]) for name, cfg in current["strategies"].items()
         }
-        new_config["position_management"] = dict(
-            current["position_management"], partial_exit_at_r=partial_exit_at_r)
         try:
             controls.save_settings(config_path, new_config)
             st.success("Settings saved. The session process will pick this up at its next cycle.")

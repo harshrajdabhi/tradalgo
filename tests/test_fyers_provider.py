@@ -71,3 +71,8 @@ def test_package_never_references_fyers_order_methods():
     for path in Path(ROOT / "tradalgo").rglob("*.py"):
         used |= {n.attr for n in ast.walk(ast.parse(path.read_text())) if isinstance(n, ast.Attribute)}
     assert not (used & forbidden)
+
+    # name-based AST checks miss getattr(client, "place_order") and order-socket imports: grep the text too
+    for path in Path(ROOT / "tradalgo").rglob("*.py"):
+        text = path.read_text()
+        assert "order_ws" not in text and "FyersOrderSocket" not in text, path

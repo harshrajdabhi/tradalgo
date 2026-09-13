@@ -127,7 +127,9 @@ def test_taken_vs_not_taken_event_routing(deps_for, taken):
     run_cycle(st, at(9, 45), frames(["AAA"], crash), crash, deps, sink,
               check_kill_switch=False)
     assert [t for _, t in sink.events] == [taken]
-    assert st.risk.trades_taken == (1 if taken else 0)
+    # an unanswered entry alert still holds its provisional slot (C2); only a taken trade realizes R
+    assert st.risk.trades_taken == 1
+    assert st.taken_trade_ids == ({101} if taken else set())
     assert (st.risk.realized_r < 0) == taken
 
 
@@ -205,3 +207,68 @@ def test_open_position_registers_trade_and_seen_key(settings):
     st = state()
     open_position(st, make_plan(make_signal(ts=at(9, 35)), qty=10), 7, settings)
     assert st.trades[7]["qty"] == 10 and len(st.position_manager["AAA"].open_trades()) == 1
+
+
+def test_missed_bars_are_replayed_so_a_skipped_bar_stop_still_alerts(deps_for):
+    """C1: a sleep/restart backlog must not skip bars — the stop hit at 09:40-09:45 must still fire."""
+    sig = make_signal(ts=at(9, 35))
+    sink, st = Sink(), state()
+    deps = deps_for(detector({at(9, 40): [sig]}))
+    run_cycle(st, at(9, 40), frames(["AAA"], flat(5)), flat(5), deps, sink, check_kill_switch=False)
+    # the 09:45 cycle never ran: at 09:50 both the 09:40 bar (low 97, stop breached) and the 09:45 bar are closed
+    late = pd.concat([flat(5), bars(at(9, 40), [(100, 100.1, 97.0, 99.5, 1000), (101, 101.5, 101.0, 101.2, 1000)])])
+    run_cycle(st, at(9, 50), frames(["AAA"], late), late, deps, sink, check_kill_switch=False)
+    assert [(e.kind, e.ts) for e, _ in sink.events] == [("stop_hit", at(9, 45))]
+    assert not st.position_manager["AAA"].open_trades()
+
+
+def test_single_bar_per_cycle_is_not_double_processed(deps_for):
+    sig = make_signal(ts=at(9, 35))
+    sink, st = Sink(), state()
+    deps = deps_for(detector({at(9, 40): [sig]}))
+    run_cycle(st, at(9, 40), frames(["AAA"], flat(5)), flat(5), deps, sink, check_kill_switch=False)
+    for n, now in ((6, at(9, 45)), (7, at(9, 50))):
+        df = pd.concat([flat(5), bars(at(9, 40), [(100, 100.2, 99.8, 100.0, 1000)] * (n - 5))])
+        run_cycle(st, now, frames(["AAA"], df), df, deps, sink, check_kill_switch=False)
+    assert sink.events == []
+    assert len(st.position_manager["AAA"].open_trades()) == 1
+
+
+def test_entry_alerts_in_one_cycle_are_capped_before_the_user_answers(deps_for):
+    """C2: with max_trades_per_day=2 only two entry alerts go out in a single cycle, even unanswered."""
+    sigs = [make_signal(s, ts=at(9, 35)) for s in ("AAA", "BBB", "CCC")]
+    sink, st = Sink(taken=False), state()
+    run_cycle(st, at(9, 40), frames(["AAA", "BBB", "CCC"], flat(5)), flat(5),
+              deps_for(detector({at(9, 40): sigs})), sink, check_kill_switch=False)
+    assert [type(d) for d in sink.decisions] == [TradePlan, TradePlan, Rejection]
+    assert "max trades" in sink.decisions[2].reason
+    assert len(sink.accepted) == 2 and st.risk.trades_taken == 2
+    assert st.reserved_trade_ids == {101, 102} and st.taken_trade_ids == set()
+
+
+def test_skipped_entry_releases_the_reserved_slot(deps_for):
+    from tradalgo.engine.cycle import release_slot
+    sigs = [make_signal(s, ts=at(9, 35)) for s in ("AAA", "BBB")]
+    sink, st = Sink(taken=False), state()
+    deps = deps_for(detector({at(9, 40): sigs, at(9, 45): [make_signal("CCC", ts=at(9, 40))]}))
+    run_cycle(st, at(9, 40), frames(["AAA", "BBB", "CCC"], flat(5)), flat(5), deps, sink, check_kill_switch=False)
+    release_slot(st, 101)
+    release_slot(st, 102)
+    assert st.risk.trades_taken == 0 and st.risk.open_trade_symbols == [] and st.risk.taken == []
+    df = pd.concat([flat(5), bars(at(9, 40), [(100, 100.2, 99.8, 100.0, 1000)])])
+    run_cycle(st, at(9, 45), frames(["AAA", "BBB", "CCC"], df), df, deps, sink, check_kill_switch=False)
+    assert isinstance(sink.decisions[-1], TradePlan) and len(sink.accepted) == 3
+
+
+def test_taken_after_reservation_does_not_double_count(deps_for):
+    sig = make_signal(ts=at(9, 35))
+    sink, st = Sink(taken=False), state()
+    run_cycle(st, at(9, 40), frames(["AAA"], flat(5)), flat(5),
+              deps_for(detector({at(9, 40): [sig]})), sink, check_kill_switch=False)
+    assert st.risk.trades_taken == 1 and st.reserved_trade_ids == {101}
+    register_taken(st, 101)
+    register_taken(st, 101)
+    assert st.risk.trades_taken == 1 and st.taken_trade_ids == {101} and st.reserved_trade_ids == set()
+    assert st.risk.open_trade_symbols == ["AAA"] and len(st.risk.taken) == 1
+    back = SessionState.from_dict(st.to_dict())
+    assert back.risk == st.risk and back.reserved_trade_ids == set()

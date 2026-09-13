@@ -71,3 +71,13 @@ def test_api_rejection_raises_auth_error():
 def test_missing_secret_names_the_key():
     with pytest.raises(AuthError, match="FYERS_SECRET_KEY"):
         login_with_auth_code(MemoryStore(FYERS_APP_ID="APP-100"), "CODE", date(2026, 9, 13), post=FakePost({}))
+
+
+def test_auth_error_never_interpolates_the_response_body():
+    """I4: a message-less error response carries the tokens; they must not reach logs or health_events."""
+    post = FakePost({"s": "error", "access_token": "SECRET-ACCESS", "refresh_token": "SECRET-REFRESH"})
+    with pytest.raises(AuthError) as exc:
+        login_with_auth_code(creds(), "code-123", date(2026, 9, 11), post=post)
+    text = str(exc.value)
+    assert "SECRET-ACCESS" not in text and "SECRET-REFRESH" not in text
+    assert "access_token" in text and "unexpected response" in text

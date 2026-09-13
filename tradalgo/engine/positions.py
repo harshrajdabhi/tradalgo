@@ -27,6 +27,8 @@ class ManagedTrade:
     closed: bool = False
     last_bar_ts: str | None = None
     last_tick_ts: str | None = None
+    # close of the bar the entry fills on: the replay cursor for a trade no bar has reached yet
+    entry_bar_ts: str | None = None
     # [changed_at_iso, stop_before, partial_before] for each stop/partial change not yet covered by a
     # closed bar, so a bar applied after later ticks is judged against the state at its own start
     changes: list[list] = field(default_factory=list)
@@ -69,7 +71,7 @@ class PositionManager:
             trade_id=trade_id, symbol=s.symbol, strategy=s.strategy, direction=s.direction,
             entry=s.entry, initial_stop=s.stop_loss, target_2r=plan.target_2r, target_3r=plan.target_3r,
             qty=plan.qty, filled_price=s.entry if filled_price is None else filled_price,
-            stop=s.stop_loss, remaining=plan.qty,
+            stop=s.stop_loss, remaining=plan.qty, entry_bar_ts=(s.ts + BAR).isoformat(),
         )
 
     def open_trades(self) -> list[ManagedTrade]:

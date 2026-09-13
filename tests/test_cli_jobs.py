@@ -1,4 +1,6 @@
+import sys
 from datetime import date, datetime
+from pathlib import Path
 
 import yaml
 from sqlalchemy import insert, select
@@ -208,7 +210,9 @@ def test_dashboard_invokes_streamlit_with_configured_host_port(tmp_path, raw_con
 
     monkeypatch.setattr(cli, "run_subprocess", fake_run)
     assert cli.main(["--config", str(cfg_path), "dashboard"]) == 0
-    assert calls[0][:2] == ["streamlit", "run"]
+    # launchd gives the job no venv on PATH: the dashboard must run through this interpreter
+    assert calls[0][:3] == [sys.executable, "-m", "streamlit"]
+    assert calls[0][3] == "run" and Path(calls[0][4]).is_absolute() and Path(calls[0][4]).exists()
     assert "127.0.0.1" in calls[0]
     assert "8501" in calls[0]
 
@@ -228,3 +232,21 @@ def test_install_launchd_writes_files(tmp_path, raw_config, monkeypatch):
     assert cli.main(["--config", str(cfg_path), "install-launchd", "--dest", str(dest)]) == 0
     assert (dest / "com.tradalgo.screen.plist").exists()
     assert (dest / "com.tradalgo.worker.plist").exists()
+
+
+def test_backtest_cli_defaults_capital_and_risk_from_settings(tmp_path, raw_config, monkeypatch):
+    """I2: the M6 gate must validate the risk configuration that will actually run live."""
+    cfg_path, settings, engine = _setup(tmp_path, raw_config, monkeypatch)
+    seen = {}
+    monkeypatch.setattr(cli, "validate_backtest_params_hook", None, raising=False)
+
+    from tradalgo.dashboard import controls
+
+    def fake_validate(params):
+        seen.update(params)
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(controls, "validate_backtest_params", fake_validate)
+    assert cli.main(["--config", str(cfg_path), "backtest", "--from", "2026-01-01", "--to", "2026-02-01"]) == 1
+    assert seen["max_risk_pct"] == settings.capital.max_risk_pct
+    assert seen["initial_capital"] == settings.capital.initial_capital

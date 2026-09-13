@@ -85,9 +85,11 @@ def process_updates(engine: Engine, client: TelegramClient, clock: Clock, offset
             text = (message.get("text") or "").strip()
             now = clock.now()
             if text == "/kill":
+                Path(data_dir).mkdir(parents=True, exist_ok=True)
                 (data_dir / "KILL").touch()
                 _health_event(engine, "telegram", "warning", "kill switch activated via Telegram", now)
-                client.send_message("Kill switch activated. All alerts stopped.")
+                client.send_message("Kill switch on - no new entry alerts. "
+                                    "Exit alerts for open trades keep coming.")
             elif text == "/resume":
                 kill_path = data_dir / "KILL"
                 if kill_path.exists():

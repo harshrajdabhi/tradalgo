@@ -12,7 +12,8 @@ from tradalgo.config import Settings
 from tradalgo.engine.events import PositionEvent
 from tradalgo.engine.positions import PositionManager
 from tradalgo.indicators.levels import key_levels, opening_range
-from tradalgo.risk.limits import DailyRiskState, kill_switch_active, register_entry, register_exit
+from tradalgo.risk.limits import (DailyRiskState, kill_switch_active, register_entry, register_exit,
+                                  release_entry)
 from tradalgo.risk.plan import Rejection, TradePlan
 from tradalgo.risk.validator import validate as validate_signal
 from tradalgo.strategies import registry
@@ -110,6 +111,8 @@ class SessionState:
     # one PositionManager per symbol: on_price applies a bar to every open trade it holds
     position_manager: dict[str, PositionManager] = field(default_factory=dict)
     taken_trade_ids: set[int] = field(default_factory=set)
+    # entry alerts sent but not yet answered: they hold a provisional slot against max_trades_per_day
+    reserved_trade_ids: set[int] = field(default_factory=set)
     seen_signals: set[tuple[str, str, str]] = field(default_factory=set)
     trades: dict[int, dict] = field(default_factory=dict)
 
@@ -126,6 +129,7 @@ class SessionState:
                      "taken": [list(t) for t in r.taken]},
             "position_manager": {s: pm.to_dict() for s, pm in self.position_manager.items()},
             "taken_trade_ids": sorted(self.taken_trade_ids),
+            "reserved_trade_ids": sorted(self.reserved_trade_ids),
             "seen_signals": sorted(list(k) for k in self.seen_signals),
             "trades": {str(k): v for k, v in self.trades.items()},
         }
@@ -139,6 +143,7 @@ class SessionState:
             trade_date=date.fromisoformat(d["trade_date"]), capital=d["capital"], risk=risk,
             position_manager={s: PositionManager.from_dict(pm) for s, pm in d["position_manager"].items()},
             taken_trade_ids=set(d["taken_trade_ids"]),
+            reserved_trade_ids=set(d.get("reserved_trade_ids", [])),
             seen_signals={tuple(k) for k in d["seen_signals"]},
             trades={int(k): v for k, v in d["trades"].items()},
         )
@@ -148,13 +153,38 @@ def _cost_r(settings: Settings, meta: dict) -> float:
     return settings.capital.fixed_cost_rupees / (meta["qty"] * meta["risk_per_share"])
 
 
+def reserve_slot(state: SessionState, trade_id: int) -> None:
+    """Hold a provisional slot against max_trades_per_day the moment an entry alert goes out.
+
+    Without it every shortlist symbol in the same cycle would pass check_limits with trades_taken == 0,
+    so up to shortlist_size full-risk entry alerts could be outstanding at once.
+    """
+    if trade_id in state.taken_trade_ids or trade_id in state.reserved_trade_ids:
+        return
+    meta = state.trades[trade_id]
+    state.reserved_trade_ids.add(trade_id)
+    state.risk = register_entry(state.risk, SimpleNamespace(symbol=meta["symbol"], strategy=meta["strategy"]))
+
+
+def release_slot(state: SessionState, trade_id: int) -> None:
+    """Give a provisional slot back: the user tapped Skipped, or the entry alert expired unanswered."""
+    if trade_id not in state.reserved_trade_ids:
+        return
+    state.reserved_trade_ids.discard(trade_id)
+    state.risk = release_entry(state.risk, state.trades[trade_id]["symbol"])
+
+
 def register_taken(state: SessionState, trade_id: int, settings: Settings | None = None) -> None:
     """Count a trade toward the daily cap/loss limit. Idempotent. Live: call when the user taps Taken."""
     if trade_id in state.taken_trade_ids:
         return
     meta = state.trades[trade_id]
-    state.taken_trade_ids.add(trade_id)
-    state.risk = register_entry(state.risk, SimpleNamespace(symbol=meta["symbol"], strategy=meta["strategy"]))
+    if trade_id in state.reserved_trade_ids:
+        state.reserved_trade_ids.discard(trade_id)   # the provisional slot becomes the real registration
+        state.taken_trade_ids.add(trade_id)
+    else:
+        state.taken_trade_ids.add(trade_id)
+        state.risk = register_entry(state.risk, SimpleNamespace(symbol=meta["symbol"], strategy=meta["strategy"]))
     if meta["closed"] and settings is not None:
         state.risk = register_exit(state.risk, meta["symbol"], meta["gross_r"] - _cost_r(settings, meta))
 
@@ -164,12 +194,20 @@ def _manage_open_trades(state: SessionState, views: dict, deps: CycleDeps, sink:
         if not pm.open_trades() or symbol not in views:
             continue
         c5 = views[symbol][0]
-        if c5.empty or c5.index[-1].date() != state.trade_date:
+        today = c5[c5.index.date == state.trade_date]
+        if today.empty:
             continue
-        start, bar = c5.index[-1], c5.iloc[-1]
-        events = pm.on_price((start + BAR).to_pydatetime(), float(bar["high"]), float(bar["low"]),
-                             float(bar["close"]), True, open=float(bar["open"]))
-        route_events(state, pm, events, deps.settings, sink)
+        # replay EVERY bar this manager has not seen (a sleep, a restart or an APScheduler backlog can skip
+        # cycles); on_price is ordered and idempotent, so an already-applied bar is a no-op. Trades whose
+        # cursor is unknown fall back to the latest bar only.
+        latest = today.index[-1].to_pydatetime()
+        cursors = [datetime.fromisoformat(c) if c else latest
+                   for c in ((t.last_bar_ts or t.entry_bar_ts) for t in pm.open_trades())]
+        cursor = min(cursors) if cursors else latest
+        for start, bar in today[today.index + BAR > pd.Timestamp(cursor)].iterrows():
+            events = pm.on_price((start + BAR).to_pydatetime(), float(bar["high"]), float(bar["low"]),
+                                 float(bar["close"]), True, open=float(bar["open"]))
+            route_events(state, pm, events, deps.settings, sink)
 
 
 def route_events(state: SessionState, pm: PositionManager, events: list[PositionEvent], settings: Settings,
@@ -203,7 +241,8 @@ def open_position(state: SessionState, plan: TradePlan, trade_id: int, settings:
             hard_exit=s.market.hard_exit)
     pm.open(trade_id, plan)
     state.trades[trade_id] = {"symbol": sig.symbol, "strategy": sig.strategy, "qty": plan.qty,
-                              "risk_per_share": sig.risk_per_share, "gross_r": 0.0, "closed": False}
+                              "risk_per_share": sig.risk_per_share, "gross_r": 0.0, "closed": False,
+                              "valid_until": to_ist(plan.valid_until).isoformat()}
     state.seen_signals.add((sig.symbol, sig.strategy, sig.ts.isoformat()))
 
 
@@ -212,6 +251,7 @@ def _enter(state: SessionState, plan: TradePlan, signal_id: int, deps: CycleDeps
     if trade_id is None:
         return
     open_position(state, plan, trade_id, deps.settings)
+    reserve_slot(state, trade_id)          # the alert is about to go out; hold a slot until it is answered
     if sink.is_taken(trade_id):
         register_taken(state, trade_id)
 
