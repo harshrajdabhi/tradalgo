@@ -11,8 +11,12 @@ class TelegramClient:
     """Thin wrapper over the Telegram Bot HTTP API. Never logs the token."""
 
     def __init__(self, token: str, chat_id: str | int, http: requests.Session | None = None, timeout: int = 15):
+        """`chat_id` may be a single id or a comma-separated string of ids ("111,222"). The first id is
+        the interactive one — it gets buttons, and is the only one tracked for edit_message (expiring an
+        alert, marking it TAKEN/SKIPPED). Any further ids get a plain, read-only copy of each message."""
         self._token = token
-        self.chat_id = chat_id
+        self.chat_ids = [c.strip() for c in str(chat_id).split(",") if c.strip()]
+        self.chat_id = self.chat_ids[0]
         self.http = http if http is not None else requests.Session()
         self.timeout = timeout
 
@@ -47,11 +51,18 @@ class TelegramClient:
         ]}
 
     def send_message(self, text: str, buttons: list[list[tuple[str, str]]] | None = None) -> int:
+        """Returns the primary chat's message_id (the one edit_message/expiry track). A failure sending
+        to an extra chat is not fatal — the primary send is what alerting depends on."""
         payload = {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}
         keyboard = self._keyboard(buttons)
         if keyboard is not None:
             payload["reply_markup"] = keyboard
         result = self._call("sendMessage", payload)
+        for extra_chat_id in self.chat_ids[1:]:
+            try:
+                self._call("sendMessage", {"chat_id": extra_chat_id, "text": text, "parse_mode": "HTML"})
+            except TelegramError:
+                pass
         return result["message_id"]
 
     def edit_message(self, message_id: int, text: str, buttons: list[list[tuple[str, str]]] | None = None) -> None:

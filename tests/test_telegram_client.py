@@ -43,6 +43,25 @@ def test_send_message_returns_message_id():
     assert "reply_markup" not in payload
 
 
+def test_send_message_broadcasts_to_comma_separated_chat_ids():
+    http = FakeSession([FakeResponse({"ok": True, "result": {"message_id": 55}}),
+                        FakeResponse({"ok": True, "result": {"message_id": 999}})])
+    client = TelegramClient(token="SECRET_TOKEN", chat_id=" 123 , 456 ", http=http)
+    assert client.chat_id == "123"
+    message_id = client.send_message("hi", buttons=[[("A", "a:1")]])
+    assert message_id == 55  # the primary chat's id is what callers track for edit_message
+    assert [c[1]["chat_id"] for c in http.calls] == ["123", "456"]
+    assert "reply_markup" in http.calls[0][1]
+    assert "reply_markup" not in http.calls[1][1]  # extra chats never get interactive buttons
+
+
+def test_send_message_ignores_a_failing_extra_chat():
+    http = FakeSession([FakeResponse({"ok": True, "result": {"message_id": 55}}),
+                        FakeResponse({"ok": False, "description": "bot was blocked by the user"})])
+    client = TelegramClient(token="SECRET_TOKEN", chat_id="123,456", http=http)
+    assert client.send_message("hi") == 55
+
+
 def test_send_message_with_buttons_builds_inline_keyboard():
     client, http = make_client([FakeResponse({"ok": True, "result": {"message_id": 1}})])
     client.send_message("hi", buttons=[[("A", "a:1"), ("B", "b:1")]])

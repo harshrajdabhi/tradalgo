@@ -66,6 +66,17 @@ def status_text():
     return "All systems nominal"
 
 
+@pytest.mark.parametrize("chat_id, allowed, expected", [
+    (999, "999", True),
+    (999, " 111 , 999 ", True),
+    (111, "999,111", True),
+    (222, "999,111", False),
+    (999, 999, True),
+])
+def test_chat_allowed_accepts_comma_separated_ids(chat_id, allowed, expected):
+    assert updates._chat_allowed(chat_id, allowed) is expected
+
+
 def test_taken_callback_records_user_action_with_price(engine):
     signal_id = seed_signal(engine)
     alert_id = seed_entry_alert(engine, signal_id=signal_id)

@@ -40,6 +40,12 @@ def _health_event(engine: Engine, component: str, level: str, message: str, ts) 
         ))
 
 
+def _chat_allowed(chat_id, allowed_chat_id: str | int) -> bool:
+    """`allowed_chat_id` may be a single id or a comma-separated string of ids ("111,222")."""
+    allowed = {c.strip() for c in str(allowed_chat_id).split(",") if c.strip()}
+    return str(chat_id) in allowed
+
+
 def process_updates(engine: Engine, client: TelegramClient, clock: Clock, offset: int, data_dir: Path,
                      allowed_chat_id: str | int, status_text: Callable[[], str]) -> int:
     updates = client.get_updates(offset, timeout=0)
@@ -53,7 +59,7 @@ def process_updates(engine: Engine, client: TelegramClient, clock: Clock, offset
 
         if callback is not None:
             from_chat = callback.get("message", {}).get("chat", {}).get("id")
-            if str(from_chat) != str(allowed_chat_id):
+            if not _chat_allowed(from_chat, allowed_chat_id):
                 continue
             data = callback.get("data", "")
             if ":" not in data:
@@ -80,7 +86,7 @@ def process_updates(engine: Engine, client: TelegramClient, clock: Clock, offset
 
         if message is not None:
             chat_id = message.get("chat", {}).get("id")
-            if str(chat_id) != str(allowed_chat_id):
+            if not _chat_allowed(chat_id, allowed_chat_id):
                 continue
             text = (message.get("text") or "").strip()
             now = clock.now()

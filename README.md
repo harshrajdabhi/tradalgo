@@ -29,14 +29,18 @@ Required names:
 
 - `FYERS_APP_ID`, `FYERS_SECRET_KEY` — from your FYERS API app.
 - `FYERS_PIN` — your FYERS trading PIN, used for the daily refresh-token → access-token exchange.
-- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — your bot's token and the chat to alert.
+- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — your bot's token and the chat to alert. `TELEGRAM_CHAT_ID`
+  may be a comma-separated list (`111,222`) to mirror alerts to more than one chat; only the first one
+  gets Taken/Skipped buttons and later edits (expiry, "marked TAKEN"), the rest get a read-only copy.
+  A command reply (`/kill`, `/status`, ...) from any listed chat is honored.
 
 The FYERS app's redirect URI must match `fyers.redirect_uri` in `config.yaml`.
 
 **Create the FYERS API app as "Non-trading"** (or, if using a "Trading" app, never grant it "Order
 placements"). This app only ever reads history/quotes — a credential that has no order-placement
 permission at all is a second line of defense, on top of the code-level guard, in case of a bug or a
-mistaken manual call.
+mistaken manual call. A Non-trading app also has no IP-address restriction, unlike a Trading app —
+important if any part of this ever runs on GitHub Actions, where the runner's IP changes every run.
 
 ## FYERS login
 
@@ -114,6 +118,19 @@ This prints the `launchctl bootstrap gui/$(id -u) <plist>` command for each job 
 ```bash
 sudo pmset repeat wakeorpoweron MTWRF 06:55:00
 ```
+
+## Running locally
+
+```bash
+cp .env.example .env      # fill in your real values; .env is gitignored
+scripts/run_local.sh      # worker + dashboard + the live session, until Ctrl+C
+```
+
+`scripts/run_local.sh` exports everything in `.env` before running, and `KeyringStore` checks the
+environment before Keychain — so filling in `.env` is enough locally, no `keyring.set_password` calls
+needed (though Keychain still works if you prefer it, e.g. for a launchd-scheduled run with no shell to
+source `.env` into). Other modes: `scripts/run_local.sh screen`, `scripts/run_local.sh preopen`,
+`scripts/run_local.sh session-only`.
 
 ## Paper-testing on GitHub Actions (no Mac required)
 
