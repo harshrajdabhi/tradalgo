@@ -1,0 +1,1 @@
+{"trade_date": "2026-09-18", "capital": 20000.0, "risk": {"trade_date": "2026-09-18", "trades_taken": 0, "realized_r": 0.0, "open_trade_symbols": [], "taken": []}, "position_manager": {}, "taken_trade_ids": [], "reserved_trade_ids": [], "seen_signals": [["INDIGO", "pullback", "2026-09-18T13:20:00+05:30"]], "trades": {}, "pending_events": []}
