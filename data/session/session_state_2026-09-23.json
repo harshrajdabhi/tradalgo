@@ -1,0 +1,1 @@
+{"trade_date": "2026-09-23", "capital": 20000.0, "risk": {"trade_date": "2026-09-23", "trades_taken": 0, "realized_r": 0.0, "open_trade_symbols": [], "taken": []}, "position_manager": {}, "taken_trade_ids": [], "reserved_trade_ids": [], "seen_signals": [], "trades": {}, "pending_events": []}
