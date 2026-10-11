@@ -529,6 +529,9 @@ def cmd_sweep(settings, args) -> int:
     reports = settings.paths.data_dir / "reports"
     checkpoint = Path(args.resume) if args.resume else reports / f"sweep-{started_at:%Y%m%d-%H%M%S}.partial.jsonl"
     print(f"checkpoint: {checkpoint}" + (" (resuming)" if args.resume else ""))
+    if args.resume_ignore_config and not args.resume:
+        print("invalid sweep: --resume-ignore-config needs --resume", file=sys.stderr)
+        return 1
     base = {}
 
     def progress(done, steps, phase, peak_rss_mb):
@@ -541,10 +544,16 @@ def cmd_sweep(settings, args) -> int:
     try:
         result = sweep.run_sweep(settings, grid, train, test, args.workers, settings.paths.data_dir / "candles",
                                  load_universe(settings.paths.static_dir), progress, checkpoint=checkpoint,
-                                 resume=bool(args.resume))
+                                 resume=bool(args.resume), resume_ignore_config=args.resume_ignore_config,
+                                 config_path=args.config)
     except (MissingDataError, OSError, ValueError) as exc:
         print(f"sweep failed: {exc}", file=sys.stderr)
         return 1
+    if result.config_changed:
+        print("!" * 72)
+        print(f"WARNING: resumed with a changed base config ({', '.join(result.config_changed)}).")
+        print("Train/test results in this report may mix two configurations. Do not trust its ranking or gate.")
+        print("!" * 72)
     paths = sweep.write_reports(result, settings, reports, started_at)
     for c in result.top:
         print(f"#{c.index} score={c.score} train exp={c.train['expectancy_r']} trades={c.train['trades']} | "
@@ -734,6 +743,8 @@ def main(argv: list[str] | None = None) -> int:
     sweep_p.add_argument("--workers", type=int, default=None)
     sweep_p.add_argument("--max-combinations", type=int, default=None)
     sweep_p.add_argument("--resume", default=None, help="continue from a sweep-<ts>.partial.jsonl checkpoint")
+    sweep_p.add_argument("--resume-ignore-config", action="store_true",
+                         help="resume even if config.yaml changed since the checkpoint (results may mix configs)")
 
     sub.add_parser("worker", help="always-on job worker: backtests, telegram sender/poller, maintenance")
 

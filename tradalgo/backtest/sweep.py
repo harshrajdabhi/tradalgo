@@ -2,6 +2,7 @@
 
 Every combination runs replay.run_backtest in memory (no DB rows) on candles preloaded once per worker process.
 """
+import hashlib
 import itertools
 import json
 import math
@@ -60,6 +61,7 @@ class SweepResult:
     combos: list[ComboResult]
     top: list[ComboResult] = field(default_factory=list)
     peak_rss_mb: float = 0.0
+    config_changed: list[str] = field(default_factory=list)
 
     @property
     def passing(self) -> list[ComboResult]:
@@ -156,12 +158,29 @@ def _peak_rss_mb() -> float:
     return round(rss / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)  # bytes on macOS, KiB on Linux
 
 
-def _header(grid: Grid, train, test) -> dict:
-    return json.loads(json.dumps({"type": "header", "grid": asdict(grid), "train": list(train), "test": list(test)},
-                                 default=str))
+def _sha(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _load_checkpoint(path: Path, header: dict) -> list[dict]:
+def config_fingerprint(settings: Settings) -> dict:
+    """sha256 of the effective base Settings, plus one per top-level section so a change can be named."""
+    dump = settings.model_dump(mode="json")
+    return {"config_sha256": _sha(dump), "config_sections": {k: _sha(v) for k, v in sorted(dump.items())}}
+
+
+def _header(grid: Grid, train, test, settings: Settings, config_path) -> dict:
+    return json.loads(json.dumps({"type": "header", "grid": asdict(grid), "train": list(train), "test": list(test),
+                                  "config_path": None if config_path is None else str(config_path),
+                                  **config_fingerprint(settings)}, default=str))
+
+
+def changed_sections(recorded: dict, current: dict) -> list[str]:
+    old, new = recorded.get("config_sections") or {}, current["config_sections"]
+    return sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+
+
+def _load_checkpoint(path: Path, header: dict, ignore_config: bool = False) -> tuple[list[dict], list[str]]:
+    """(finished result entries, top-level config sections that differ from the checkpoint's base config)."""
     lines = []
     for line in path.read_text().splitlines():
         try:
@@ -170,9 +189,16 @@ def _load_checkpoint(path: Path, header: dict) -> list[dict]:
             continue  # a line cut off by the interruption
     if not lines or lines[0].get("type") != "header":
         raise ValueError(f"{path} is not a sweep checkpoint")
-    if lines[0] != header:
+    recorded = lines[0]
+    if any(recorded.get(k) != header[k] for k in ("grid", "train", "test")):
         raise ValueError(f"checkpoint {path} does not match this grid/split")
-    return [entry for entry in lines[1:] if entry.get("type") == "result"]
+    changed = [] if recorded.get("config_sha256") == header["config_sha256"] else \
+        changed_sections(recorded, header) or ["unknown"]
+    if changed and not ignore_config:
+        raise ValueError(f"checkpoint {path}: base config changed since the sweep started "
+                         f"(sections: {', '.join(changed)}; recorded from {recorded.get('config_path')}); "
+                         f"restore it or pass --resume-ignore-config to mix results knowingly")
+    return [entry for entry in lines[1:] if entry.get("type") == "result"], changed
 
 
 def score(train: dict, grid: Grid) -> float | None:
@@ -283,11 +309,13 @@ def _map(tasks, workers, init_args, on_done):
 def run_sweep(settings: Settings, grid: Grid, train=DEFAULT_TRAIN, test=DEFAULT_TEST, workers: int | None = None,
               cache_root: str | Path = "data/candles", universe: list[Constituent] = (),
               progress_cb=lambda done, total, phase, peak_rss_mb: None, checkpoint: str | Path | None = None,
-              resume: bool = False, **backtest_kwargs) -> SweepResult:
+              resume: bool = False, resume_ignore_config: bool = False, config_path: str | Path | None = None,
+              **backtest_kwargs) -> SweepResult:
     """backtest_kwargs (classify/detect_all) go to run_backtest and must be picklable when workers > 1.
 
     checkpoint: a JSONL file getting a header line and then one line per finished combination per phase;
-    resume=True reloads it (it must match grid and split), skips finished work and keeps appending.
+    resume=True reloads it (it must match grid, split and base config), skips finished work and keeps appending;
+    resume_ignore_config=True accepts a changed base config and records the changed sections in the result.
     """
     check_split(train, test)
     total, combos = expand_grid(grid)
@@ -295,8 +323,8 @@ def run_sweep(settings: Settings, grid: Grid, train=DEFAULT_TRAIN, test=DEFAULT_
     workers = workers if workers is not None else default_workers()
     init_args = (settings, str(cache_root), list(universe), backtest_kwargs)
     results = [ComboResult(i, c, {}) for i, c in enumerate(combos)]
-    header = _header(grid, train, test)
-    finished = _load_checkpoint(Path(checkpoint), header) if resume else []
+    header = _header(grid, train, test, settings, config_path)
+    finished, config_changed = _load_checkpoint(Path(checkpoint), header, resume_ignore_config) if resume else ([], [])
     if checkpoint is not None and not resume:
         Path(checkpoint).parent.mkdir(parents=True, exist_ok=True)
         Path(checkpoint).write_text(json.dumps(header) + "\n")
@@ -334,7 +362,7 @@ def run_sweep(settings: Settings, grid: Grid, train=DEFAULT_TRAIN, test=DEFAULT_
     for c in top:
         c.overfit = is_overfit(c.train, c.test)
         c.passes_gate = passes_gate(settings, c.train, c.test)
-    return SweepResult(grid, tuple(train), tuple(test), total, results, top, peak)
+    return SweepResult(grid, tuple(train), tuple(test), total, results, top, peak, config_changed)
 
 
 def _flat(tree: dict, prefix: str = "") -> dict:
@@ -369,6 +397,8 @@ def render_markdown(result: SweepResult, settings: Settings) -> str:
         f"- Gate: test expectancy_r > 0, train+test trades ≥ {GATE_MIN_TRADES}, test maxDD ≤ "
         f"{settings.capital.daily_loss_limit_r * GATE_DD_MULT}R",
         f"- Peak worker RSS: {result.peak_rss_mb} MB",
+        *([f"- **WARNING: resumed with a changed base config ({', '.join(result.config_changed)}); train/test "
+           f"results may mix two configurations.**"] if result.config_changed else []),
         "", "## Grid", "", "```yaml", yaml.safe_dump(g.overrides, sort_keys=True).rstrip(), "```", "",
         "## Top combinations (ranked on train)", "",
         "| # | overrides | train trades | train win | train exp R | train PF | train maxDD | score | "
@@ -404,7 +434,7 @@ def write_reports(result: SweepResult, settings: Settings, out_dir: str | Path, 
     payload = {"generated_at": now.isoformat(), "train": [d.isoformat() for d in result.train],
                "test": [d.isoformat() for d in result.test], "grid": asdict(result.grid),
                "total_combinations": result.total_combinations, "verdict": verdict(result),
-               "peak_rss_mb": result.peak_rss_mb,
+               "peak_rss_mb": result.peak_rss_mb, "config_changed": result.config_changed,
                "top": [asdict(c) for c in result.top], "combos": [asdict(c) for c in result.combos]}
     paths["json"].write_text(json.dumps(payload, indent=2, default=str))
     if result.best:

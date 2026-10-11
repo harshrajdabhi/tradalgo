@@ -58,3 +58,26 @@ def test_sink_stores_every_leg_in_order(tmp_path):
                        "new_stop": 100.0}
     assert legs[4]["qty"] == 40 and legs[4]["r"] == 1.0 and "new_stop" not in legs[4]
     assert row["exit_reason"] == "stop_hit"
+
+
+def test_migration_survives_a_concurrent_init(tmp_path, monkeypatch):
+    from tradalgo.storage import db
+    engine = make_engine(tmp_path / "race.db")
+    init_db(engine)
+    # another process added the column between our check and our ALTER
+    monkeypatch.setattr(db, "_columns", lambda conn, table: set())
+    init_db(engine)
+    init_db(engine)
+    assert "legs_json" in _columns(engine)
+
+
+def test_migration_reraises_other_errors(tmp_path, monkeypatch):
+    import pytest
+    from sqlalchemy.exc import OperationalError
+    from tradalgo.storage import db
+    engine = make_engine(tmp_path / "other.db")
+    init_db(engine)
+    monkeypatch.setattr(db, "_columns", lambda conn, table: set())
+    monkeypatch.setattr(db, "MIGRATIONS", [("no_such_table", "legs_json", "TEXT")])
+    with pytest.raises(OperationalError, match="no such table"):
+        init_db(engine)

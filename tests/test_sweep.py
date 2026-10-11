@@ -179,7 +179,10 @@ def test_cli_exit_codes(cli_config, cache_root, tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "combos 1/2" in out and "No configuration passes" in out
     reports = tmp_path / "data" / "reports"
-    assert len(list(reports.glob("sweep-*.md"))) == 1 and len(list(reports.glob("sweep-*.partial.jsonl"))) == 1
+    assert len(list(reports.glob("sweep-*.md"))) == 1
+    # the empty-cache run above may leave a header-only checkpoint under another second's timestamp
+    with_results = [p for p in reports.glob("sweep-*.partial.jsonl") if len(p.read_text().splitlines()) > 1]
+    assert len(with_results) == 1
     assert "peak worker RSS" in out
 
 
@@ -278,3 +281,47 @@ def test_report_shows_peak_rss(settings, tmp_path):
     paths = sweep.write_reports(result, settings, tmp_path, datetime(2026, 9, 14, 10, 0, tzinfo=IST))
     assert "Peak worker RSS: 321.5 MB" in paths["md"].read_text()
     assert json.loads(paths["json"].read_text())["peak_rss_mb"] == 321.5
+
+
+def test_resume_refuses_changed_base_config_unless_ignored(settings, cache_root, tmp_path):
+    part = tmp_path / "cfg.partial.jsonl"
+    kw = dict(classify=fake_classify, detect_all=param_detector)
+    run_sweep(settings, rvol_grid(top_k=1), TRAIN, TEST, 1, cache_root, SYMBOLS, checkpoint=part,
+              config_path="config.yaml", **kw)
+    header = json.loads(part.read_text().splitlines()[0])
+    assert header["config_path"] == "config.yaml" and len(header["config_sha256"]) == 64
+
+    same = run_sweep(settings, rvol_grid(top_k=1), TRAIN, TEST, 1, cache_root, SYMBOLS, checkpoint=part,
+                     resume=True, **kw)
+    assert same.config_changed == []
+
+    edited = sweep.settings_with_overrides(settings, {"capital": {"max_risk_pct": 0.02}})
+    with pytest.raises(ValueError, match=r"base config changed.*capital"):
+        run_sweep(edited, rvol_grid(top_k=1), TRAIN, TEST, 1, cache_root, SYMBOLS, checkpoint=part, resume=True,
+                  **kw)
+
+    mixed = run_sweep(edited, rvol_grid(top_k=1), TRAIN, TEST, 1, cache_root, SYMBOLS, checkpoint=part,
+                      resume=True, resume_ignore_config=True, **kw)
+    assert mixed.config_changed == ["capital"]
+    paths = sweep.write_reports(mixed, settings, tmp_path / "r", datetime(2026, 9, 14, 10, 0, tzinfo=IST))
+    assert "WARNING: resumed with a changed base config (capital)" in paths["md"].read_text()
+    assert json.loads(paths["json"].read_text())["config_changed"] == ["capital"]
+
+
+def test_cli_resume_config_guard(cli_config, cache_root, tmp_path, monkeypatch, capsys):
+    real = sweep.run_sweep
+    monkeypatch.setattr(sweep, "run_sweep", lambda s, g, train, test, workers, cache_root_, universe_, progress_cb,
+                        **kw: real(s, g, train, test, workers, cache_root, SYMBOLS, progress_cb,
+                                   classify=fake_classify, detect_all=param_detector, **kw))
+    grid = _grid_file(tmp_path, {"strategies": {"orb": {"params": {"min_rvol": [1.5]}}}})
+    assert _cli(cli_config, grid) == 0
+    part = str(next((tmp_path / "data" / "reports").glob("sweep-*.partial.jsonl")))
+    raw = yaml.safe_load(cli_config.read_text())
+    raw["capital"]["max_risk_pct"] = 0.02
+    cli_config.write_text(yaml.safe_dump(raw))
+    capsys.readouterr()
+
+    assert _cli(cli_config, grid, "--resume", part) == 1
+    assert "capital" in capsys.readouterr().err
+    assert _cli(cli_config, grid, "--resume", part, "--resume-ignore-config") == 0
+    assert "WARNING" in capsys.readouterr().out
