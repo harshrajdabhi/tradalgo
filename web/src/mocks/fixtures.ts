@@ -257,11 +257,14 @@ export const replay: T.ReplayResponse = {
   markers: [
     { time: replayCandles[5].time, kind: "entry", price: 2845.1, qty: 40, r: 0 },
     { time: replayCandles[25].time, kind: "partial_exit", price: 2880, qty: 20, r: 1.0 },
+    // breakeven_after_partial: stop moves to entry at the partial-exit time
+    { time: replayCandles[25].time, kind: "trail_update", price: 2845.1, qty: 20, r: 0, new_stop: 2845.1 },
     { time: replayCandles[30].time, kind: "trail_update", price: 2855, qty: 20, r: 0.5, new_stop: 2855 },
     { time: replayCandles[55].time, kind: "runner_exit", price: 2870, qty: 20, r: 0.7 },
   ],
   stop_path: [
     { time: replayCandles[5].time, value: 2822 },
+    { time: replayCandles[25].time, value: 2845.1 },
     { time: replayCandles[30].time, value: 2855 },
   ],
 };

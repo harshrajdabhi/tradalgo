@@ -97,4 +97,28 @@ test.describe("smoke", () => {
     const rail = await page.getByRole("navigation", { name: "Primary" }).boundingBox();
     expect(rail!.y + rail!.height).toBeGreaterThanOrEqual(499);
   });
+
+  test("replay panel hides upcoming events by default and the speed select keeps its keys", async ({ page }) => {
+    await page.goto("/backtests/141");
+    await page.getByRole("tab", { name: "Replay" }).click();
+    await page.waitForTimeout(400);
+    for (let i = 0; i < 10; i++) await page.keyboard.press("ArrowRight");
+    const panel = page.locator("text=At playhead").locator("xpath=ancestor::div[contains(@class,'MuiPaper-root')][1]");
+    const text = await panel.innerText();
+    expect(text).not.toMatch(/Next/i);
+    expect(text).not.toMatch(/remaining/i);
+    // every time shown in the panel must be <= playhead time
+    const times = [...text.matchAll(/(\d{2}):(\d{2})/g)].map((m) => Number(m[1]) * 60 + Number(m[2]));
+    const playhead = times[0];
+    expect(times.every((t) => t <= playhead)).toBe(true);
+    await page.getByLabel("Show upcoming events").check();
+    await expect(page.getByTestId("next-event")).toBeVisible();
+    await page.screenshot({ path: "test-results/screenshots/backtests_141_replay_upcoming_on.png", fullPage: true });
+    await page.getByLabel("Show upcoming events").uncheck();
+    // speed select: arrow keys must not step the replay while the combobox is focused
+    await page.getByRole("combobox").focus();
+    const before = await panel.innerText();
+    await page.keyboard.press("ArrowRight");
+    expect(await panel.innerText()).toBe(before);
+  });
 });

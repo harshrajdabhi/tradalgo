@@ -4,6 +4,8 @@ import Grid from "@mui/material/Grid";
 import Paper from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
 import IconButton from "@mui/material/IconButton";
+import Switch from "@mui/material/Switch";
+import FormControlLabel from "@mui/material/FormControlLabel";
 import Slider from "@mui/material/Slider";
 import Select from "@mui/material/Select";
 import MenuItem from "@mui/material/MenuItem";
@@ -14,6 +16,7 @@ import SkipNextIcon from "@mui/icons-material/SkipNext";
 import { useBacktestTrades, useReplay } from "../../api/hooks";
 import { EmptyBox, ErrorBox, LoadingBox } from "../StateBox";
 import ReplayChart from "./ReplayChart";
+import { replayKeyIgnored } from "../../lib/keyTarget";
 import { replayStateAtPlayhead } from "../../lib/replayState";
 import { formatR, formatIstTime } from "../../lib/format";
 
@@ -31,6 +34,21 @@ export default function ReplayView({
   const [playheadIndex, setPlayheadIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
+  const [showUpcoming, setShowUpcoming] = useState(() => {
+    try {
+      return localStorage.getItem("tradalgo-replay-upcoming") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const setUpcoming = (v: boolean) => {
+    setShowUpcoming(v);
+    try {
+      localStorage.setItem("tradalgo-replay-upcoming", v ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  };
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -83,8 +101,7 @@ export default function ReplayView({
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+      if (replayKeyIgnored(e.target)) return;
       // Capture phase: stop focused Tabs/buttons from also reacting to
       // Space and the arrow keys (MUI Tabs would move focus between tabs).
       if (e.key === " " || e.key.startsWith("Arrow")) e.stopPropagation();
@@ -252,16 +269,21 @@ export default function ReplayView({
                     ))}
                 </Grid>
                 <Grid item xs={12}>
-                  <Typography variant="caption" color="text.secondary">
-                    Next event
-                  </Typography>
-                  <Typography variant="body2">
-                    {state.nextEvent
-                      ? `${state.nextEvent.kind} @ ${formatIstTime(
-                          new Date(state.nextEvent.time * 1000).toISOString()
-                        )}`
-                      : "none remaining"}
-                  </Typography>
+                  <FormControlLabel
+                    control={
+                      <Switch size="small" checked={showUpcoming} onChange={(e) => setUpcoming(e.target.checked)} />
+                    }
+                    label={<Typography variant="caption">Show upcoming events</Typography>}
+                  />
+                  {showUpcoming && (
+                    <Typography variant="body2" data-testid="next-event">
+                      {state.nextEvent
+                        ? `Next: ${state.nextEvent.kind.replace("_", " ")} @ ${formatIstTime(
+                            new Date(state.nextEvent.time * 1000).toISOString()
+                          )}`
+                        : "none remaining"}
+                    </Typography>
+                  )}
                 </Grid>
               </Grid>
             )}
