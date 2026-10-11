@@ -1,6 +1,4 @@
-"""Pure Now-strip priority logic, ported from tradalgo.dashboard.theme (which imports streamlit
-at module scope and so cannot be imported from the API process).
-"""
+"""Pure Now-strip priority logic."""
 import re
 from dataclasses import dataclass
 

@@ -99,12 +99,30 @@ capped at `capital.max_leverage` regardless of what the file says.
 
 ## Dashboard
 
+A FastAPI API plus a React app (`web/`). Build the UI once:
+
 ```bash
-.venv/bin/tradalgo dashboard
+cd web && npm ci && npm run build
 ```
 
-Opens Streamlit at `http://127.0.0.1:8501` (host/port from `config.yaml`, always loopback-only). It only
-reads SQLite — it never calls FYERS directly or runs the trading engine.
+Then:
+
+```bash
+.venv/bin/tradalgo dashboard      # http://127.0.0.1:8501
+```
+
+Host/port come from `config.yaml` (always loopback-only). If `web/dist` is missing the command exits with
+the build instruction above. It only reads SQLite and the candle cache (plus a few narrow writes: kill
+switch, resend, settings, backtest queue) - it never calls FYERS directly or runs the trading engine.
+
+Dev mode: `tradalgo dashboard --dev` runs the API only; in another terminal run `cd web && npm run dev` and
+open http://127.0.0.1:5173 (Vite proxies `/api`).
+
+Features:
+- Live backtest analysis: queue a backtest and watch progress, equity curve, latest trades and diagnostics.
+- Trade replay: step through a backtest trade's price action with entries, partial exits, trailing stop and
+  VWAP clipped to the playhead; "Show upcoming events" is off by default so future bars are not leaked.
+- Today, positions, alerts (resend failed), journal, analytics, health, sweeps and settings pages.
 
 ## Scheduling with launchd
 
@@ -125,7 +143,7 @@ sudo pmset repeat wakeorpoweron MTWRF 06:55:00
 
 ```bash
 cp .env.example .env      # fill in your real values; .env is gitignored
-scripts/run_local.sh      # worker + dashboard + the live session, until Ctrl+C
+scripts/run_local.sh      # worker + dashboard (http://127.0.0.1:8501) + the live session, until Ctrl+C
 ```
 
 `scripts/run_local.sh` exports everything in `.env` before running, and `KeyringStore` checks the

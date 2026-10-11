@@ -390,7 +390,7 @@ def cmd_ci_cycle(settings, args) -> int:
 
 
 def cmd_backtest(settings, args) -> int:
-    from tradalgo.dashboard.controls import validate_backtest_params
+    from tradalgo.api.controls import validate_backtest_params
     from tradalgo.data.universe import load_universe
     from tradalgo.jobs.backtest_worker import process_run
 
@@ -637,14 +637,22 @@ def cmd_report(settings, args) -> int:
     return 0
 
 
+WEB_DIST = Path(__file__).resolve().parents[1] / "web" / "dist"
+DASHBOARD_BUILD_HINT = "Dashboard isn't built yet. Run: cd web && npm ci && npm run build"
+
+
 def cmd_dashboard(settings, args) -> int:
-    env = {**os.environ, "TRADALGO_CONFIG": str(Path(args.config).resolve())}
+    dev = getattr(args, "dev", False)
+    if not dev and not (WEB_DIST / "index.html").exists():
+        print(DASHBOARD_BUILD_HINT, file=sys.stderr)
+        return 1
     # launchd runs this job with no venv on PATH, and from an arbitrary cwd
-    app = Path(__file__).resolve().parent / "dashboard" / "app.py"
-    cmd = [sys.executable, "-m", "streamlit", "run", str(app),
-           "--server.address", settings.dashboard.host,
-           "--server.port", str(settings.dashboard.port),
-           "--server.headless", "true"]
+    env = {**os.environ, "TRADALGO_CONFIG": str(Path(args.config).resolve())}
+    cmd = [sys.executable, "-m", "uvicorn", "tradalgo.api.app:app",
+           "--host", settings.dashboard.host, "--port", str(settings.dashboard.port)]
+    if dev:
+        print("API only. UI at http://127.0.0.1:5173 - run in another terminal: cd web && npm run dev "
+              "(Vite proxies /api)")
     result = run_subprocess(cmd, env=env)
     return getattr(result, "returncode", 0) or 0
 
@@ -753,7 +761,8 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--run-id", dest="run_id", default=None)
     report.add_argument("--telegram", action="store_true")
 
-    sub.add_parser("dashboard", help="launch the Streamlit dashboard on 127.0.0.1")
+    p_dash = sub.add_parser("dashboard", help="serve the API + built web app on 127.0.0.1")
+    p_dash.add_argument("--dev", action="store_true", help="API only; use the Vite dev server for the UI")
 
     install_launchd = sub.add_parser("install-launchd", help="render and install launchd plists")
     install_launchd.add_argument("--dest", default="~/Library/LaunchAgents")

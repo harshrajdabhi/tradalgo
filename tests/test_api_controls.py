@@ -8,7 +8,7 @@ import yaml
 from sqlalchemy import insert, select
 
 from tradalgo.clock import IST
-from tradalgo.dashboard import controls
+from tradalgo.api import controls
 from tradalgo.storage.db import init_db, make_engine
 from tradalgo.storage.schema import alerts, backtest_runs
 

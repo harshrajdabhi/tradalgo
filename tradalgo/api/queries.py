@@ -1,4 +1,4 @@
-"""Read-only queries: plain functions (engine, ...) -> pandas.DataFrame. No Streamlit import here."""
+"""Read-only queries: plain functions (engine, ...) -> pandas.DataFrame."""
 import json
 
 import pandas as pd

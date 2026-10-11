@@ -24,6 +24,11 @@ TRADALGO="${VIRTUAL_ENV:-.venv}/bin/tradalgo"
 
 "$TRADALGO" init
 
+if [ -z "${1:-}" ] && [ ! -f web/dist/index.html ]; then
+  echo "building the dashboard (first run)..."
+  (cd web && npm ci && npm run build)
+fi
+
 case "${1:-}" in
   screen)
     exec "$TRADALGO" screen
@@ -48,7 +53,7 @@ case "${1:-}" in
 
     "$TRADALGO" dashboard &
     pids+=($!)
-    echo "dashboard started (pid $!) - http://127.0.0.1:8501"
+    echo "dashboard started (pid $!) - open http://127.0.0.1:8501"
 
     echo "starting the live session (Ctrl+C to stop everything)..."
     "$TRADALGO" session

@@ -18,8 +18,6 @@ dependencies = [
     "fyers-apiv3>=3.1",
     "yfinance>=0.2.40",
     "APScheduler>=3.10,<4",
-    "streamlit>=1.37",
-    "plotly>=5.20",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
 ]

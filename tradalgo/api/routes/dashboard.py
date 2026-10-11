@@ -11,7 +11,7 @@ from tradalgo.api.models import HealthResponse, NowResponse
 from tradalgo.api.util import df_records
 from tradalgo.clock import IST, MarketCalendar, load_holidays
 from tradalgo.config import KeyringStore, Settings
-from tradalgo.dashboard import controls, queries
+from tradalgo.api import controls, queries
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
@@ -22,6 +22,10 @@ def _settings(request: Request) -> Settings:
 
 def _engine(settings: Settings = Depends(_settings)) -> Engine:
     return get_engine(settings)
+
+
+def _today() -> str:
+    return datetime.now(IST).date().isoformat()
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -54,13 +58,13 @@ def now_strip(date: str | None = Query(default=None), settings: Settings = Depen
 
 
 @router.get("/shortlist")
-def shortlist(date: str = Query(...), engine: Engine = Depends(_engine)):
-    return df_records(queries.shortlist_for_date(engine, date))
+def shortlist(date: str | None = Query(default=None), engine: Engine = Depends(_engine)):
+    return df_records(queries.shortlist_for_date(engine, date or _today()))
 
 
 @router.get("/signals")
-def signals(date: str = Query(...), engine: Engine = Depends(_engine)):
-    return df_records(queries.signals_with_decisions(engine, date))
+def signals(date: str | None = Query(default=None), engine: Engine = Depends(_engine)):
+    return df_records(queries.signals_with_decisions(engine, date or _today()))
 
 
 @router.get("/positions")

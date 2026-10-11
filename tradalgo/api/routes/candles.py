@@ -8,7 +8,7 @@ from tradalgo.api.deps import get_engine, settings_for_request
 from tradalgo.api.util import is_valid_symbol
 from tradalgo.clock import IST
 from tradalgo.config import Settings
-from tradalgo.dashboard import queries
+from tradalgo.api import queries
 from tradalgo.data.candle_cache import CandleCache
 
 router = APIRouter(prefix="/api/candles", tags=["candles"])

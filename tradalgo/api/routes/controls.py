@@ -7,7 +7,7 @@ from sqlalchemy import Engine
 from tradalgo.api.deps import get_engine, settings_for_request
 from tradalgo.api.models import KillSwitchRequest
 from tradalgo.config import Settings
-from tradalgo.dashboard import controls
+from tradalgo.api import controls
 
 router = APIRouter(prefix="/api", tags=["controls"])
 

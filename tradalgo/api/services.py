@@ -1,6 +1,4 @@
-"""Logic extracted from the Streamlit pages (tradalgo/dashboard/pages/*.py), which will be
-deleted at B4. Kept here, tested here, and imported by the API routes.
-"""
+"""Page-level logic for the API routes (kept pure and tested here)."""
 import json
 from datetime import datetime, timedelta
 
@@ -9,7 +7,7 @@ from sqlalchemy import Engine, text
 
 from tradalgo.api import now as now_mod
 from tradalgo.clock import IST
-from tradalgo.dashboard import controls, queries
+from tradalgo.api import controls, queries
 from tradalgo.data.candle_cache import CandleCache
 
 
@@ -203,3 +201,25 @@ def trade_replay_markers(trade: dict, entry_stop: float | None) -> dict:
         "price": trade["exit_price"], "qty": trade["qty"], "r": trade["net_r"],
     }
     return {"markers": [entry_marker, exit_marker], "stop_path": stop_path}
+
+
+def diagnostics_for_ui(diag: dict, trades: pd.DataFrame) -> dict:
+    """Reshape diagnose() output for the web app: keyed dicts become the row lists the charts
+    consume. Raw keys the UI does not chart are kept as-is.
+    """
+    out = dict(diag)
+    out["by_hour"] = [{"hour": int(k), "trades": v["trades"], "avg_r": v["expectancy_r"]}
+                      for k, v in sorted(diag.get("by_hour", {}).items(), key=lambda kv: int(kv[0]))]
+    total = sum(v["trades"] for v in diag.get("by_exit_reason", {}).values())
+    out["by_exit_reason"] = [{"reason": k, "count": v["trades"], "share": round(v["trades"] / total, 4)}
+                             for k, v in diag.get("by_exit_reason", {}).items()]
+    losers = trades[trades["net_r"] < 0] if not trades.empty else trades
+    out["mfe_losers_by_strategy"] = {
+        str(strat): [round(float(x), 4) for x in g["mfe_r"]] for strat, g in losers.groupby("strategy")
+    } if not losers.empty else {}
+    by_reason: dict[str, int] = {}
+    for reasons in diag.get("rejections", {}).values():
+        for reason, n in reasons.items():
+            by_reason[reason] = by_reason.get(reason, 0) + n
+    out["rejections"] = [{"reason": r, "count": n} for r, n in by_reason.items()]
+    return out

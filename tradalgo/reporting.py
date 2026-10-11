@@ -1,4 +1,4 @@
-"""Pure DB-reading report builders (no Streamlit, no side effects)."""
+"""Pure DB-reading report builders (no side effects)."""
 import html
 import json
 from datetime import date, datetime, timedelta

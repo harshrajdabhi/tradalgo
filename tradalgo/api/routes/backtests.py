@@ -12,7 +12,7 @@ from tradalgo.api.util import df_records, is_valid_symbol
 from tradalgo.backtest import diagnostics
 from tradalgo.clock import IST
 from tradalgo.config import Settings
-from tradalgo.dashboard import controls, queries
+from tradalgo.api import controls, queries
 from tradalgo.storage.schema import backtest_runs
 
 router = APIRouter(prefix="/api/backtests", tags=["backtests"])
@@ -63,7 +63,7 @@ def get_backtest(run_id: int, engine: Engine = Depends(_engine)):
     diag = None
     if not trades.empty:
         run_data = diagnostics.load_run(engine, run_id)
-        diag = diagnostics.diagnose(run_data)
+        diag = services.diagnostics_for_ui(diagnostics.diagnose(run_data), run_data.trades)
     return {
         "run": run,
         "params": json.loads(run["params_json"]) if run.get("params_json") else None,

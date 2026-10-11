@@ -14,6 +14,7 @@ from starlette.responses import FileResponse, JSONResponse
 
 from tradalgo.api.routes import backtests, candles, controls, dashboard, sweeps
 
+DEFAULT_WEB_DIST = Path(__file__).resolve().parents[2] / "web" / "dist"
 DEV_ORIGINS = ["http://127.0.0.1:5173", "http://localhost:5173"]
 
 
@@ -28,7 +29,7 @@ def create_app(config_path: str | None = None, web_dist: str | Path | None = Non
     for router in (dashboard.router, backtests.router, candles.router, controls.router, sweeps.router):
         app.include_router(router)
 
-    dist = Path(web_dist) if web_dist is not None else Path("web/dist")
+    dist = Path(web_dist) if web_dist is not None else DEFAULT_WEB_DIST
     if dist.exists():
         assets_dir = dist / "assets"
         if assets_dir.exists():

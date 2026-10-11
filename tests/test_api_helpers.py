@@ -1,5 +1,5 @@
 """Shared tmp-config + seeded-DB fixture for tests/test_api_*.py, reusing the seed helper from
-tests/test_dashboard_queries.py (copied here per the B1 brief since dashboard/ is deleted at B4).
+tests/test_api_queries.py.
 """
 import json
 import shutil

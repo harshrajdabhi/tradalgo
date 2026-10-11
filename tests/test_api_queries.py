@@ -6,7 +6,7 @@ from pathlib import Path
 
 from sqlalchemy import insert
 
-from tradalgo.dashboard import queries
+from tradalgo.api import queries
 from tradalgo.storage.db import init_db, make_engine
 from tradalgo.storage.schema import (
     alerts, backtest_runs, backtest_trades, decisions, health_events, job_runs,

@@ -1,7 +1,9 @@
 import sys
+
 from datetime import date, datetime
 from pathlib import Path
 
+import pytest
 import yaml
 from sqlalchemy import insert, select
 
@@ -236,24 +238,51 @@ def test_preopen_skips_and_warns_when_fyers_unavailable(tmp_path, raw_config, mo
     assert any(r.component == "data" and "token expired" in r.message for r in rows)
 
 
-def test_dashboard_invokes_streamlit_with_configured_host_port(tmp_path, raw_config, monkeypatch):
+def test_dashboard_runs_uvicorn_with_configured_host_port(tmp_path, raw_config, monkeypatch):
     cfg_path, settings, engine = _setup(tmp_path, raw_config, monkeypatch)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html></html>")
+    monkeypatch.setattr(cli, "WEB_DIST", dist)
     calls = []
 
     class Result:
         returncode = 0
 
     def fake_run(cmd, env=None):
-        calls.append(cmd)
+        calls.append((cmd, env))
         return Result()
 
     monkeypatch.setattr(cli, "run_subprocess", fake_run)
     assert cli.main(["--config", str(cfg_path), "dashboard"]) == 0
+    cmd, env = calls[0]
     # launchd gives the job no venv on PATH: the dashboard must run through this interpreter
-    assert calls[0][:3] == [sys.executable, "-m", "streamlit"]
-    assert calls[0][3] == "run" and Path(calls[0][4]).is_absolute() and Path(calls[0][4]).exists()
-    assert "127.0.0.1" in calls[0]
-    assert "8501" in calls[0]
+    assert cmd[:4] == [sys.executable, "-m", "uvicorn", "tradalgo.api.app:app"]
+    assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
+    assert cmd[cmd.index("--port") + 1] == "8501"
+    assert env["TRADALGO_CONFIG"] == str(Path(cfg_path).resolve())
+
+
+def test_dashboard_missing_dist_exits_with_build_hint(tmp_path, raw_config, monkeypatch, capsys):
+    cfg_path, settings, engine = _setup(tmp_path, raw_config, monkeypatch)
+    monkeypatch.setattr(cli, "WEB_DIST", tmp_path / "nope")
+    monkeypatch.setattr(cli, "run_subprocess", lambda *a, **k: pytest.fail("must not start"))
+    assert cli.main(["--config", str(cfg_path), "dashboard"]) == 1
+    assert "npm ci && npm run build" in capsys.readouterr().err
+
+
+def test_dashboard_dev_runs_api_only_without_dist(tmp_path, raw_config, monkeypatch, capsys):
+    cfg_path, settings, engine = _setup(tmp_path, raw_config, monkeypatch)
+    monkeypatch.setattr(cli, "WEB_DIST", tmp_path / "nope")
+    calls = []
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr(cli, "run_subprocess", lambda cmd, env=None: calls.append(cmd) or Result())
+    assert cli.main(["--config", str(cfg_path), "dashboard", "--dev"]) == 0
+    assert calls[0][:3] == [sys.executable, "-m", "uvicorn"]
+    assert "http://127.0.0.1:5173" in capsys.readouterr().out
 
 
 def test_install_launchd_dry_run_prints_plists(tmp_path, raw_config, monkeypatch, capsys):
@@ -279,7 +308,7 @@ def test_backtest_cli_defaults_capital_and_risk_from_settings(tmp_path, raw_conf
     seen = {}
     monkeypatch.setattr(cli, "validate_backtest_params_hook", None, raising=False)
 
-    from tradalgo.dashboard import controls
+    from tradalgo.api import controls
 
     def fake_validate(params):
         seen.update(params)
