@@ -9,7 +9,7 @@ import ListItem from "@mui/material/ListItem";
 import ListItemText from "@mui/material/ListItemText";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { BarChart } from "@mui/x-charts/BarChart";
-import { Gauge } from "@mui/x-charts/Gauge";
+import CircularProgress from "@mui/material/CircularProgress";
 import { useTheme } from "@mui/material/styles";
 import { EmptyBox } from "../StateBox";
 import type { BacktestDetailResponse } from "../../api/types";
@@ -81,7 +81,22 @@ export default function DiagnosticsPanel({ detail }: { detail: BacktestDetailRes
             Fill rate
           </Typography>
           <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
-            <Gauge width={140} height={140} value={Math.round(fillRate * 100)} text={`${Math.round(fillRate * 100)}%`} />
+            <Box sx={{ position: "relative", display: "inline-flex" }}>
+              <CircularProgress variant="determinate" value={100} size={120} thickness={3} sx={{ color: "divider" }} />
+              <CircularProgress
+                variant="determinate"
+                value={Math.round(fillRate * 100)}
+                size={120}
+                thickness={3}
+                sx={{ color: "text.primary", position: "absolute", left: 0 }}
+              />
+              <Typography
+                variant="h5"
+                sx={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontVariantNumeric: "tabular-nums" }}
+              >
+                {Math.round(fillRate * 100)}%
+              </Typography>
+            </Box>
             <Typography variant="caption" color="text.secondary">
               Missed entries: {metrics.missed_entries ?? "—"}
             </Typography>

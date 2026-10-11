@@ -120,7 +120,7 @@ export const jobs: T.JobsResponse = {
 const equityCurveRunning: T.EquityPoint[] = Array.from({ length: 37 }, (_, i) => ({
   trade_index: i + 1,
   exit_ts: `2026-09-14T0${9 + Math.floor(i / 10)}:${(i % 60).toString().padStart(2, "0")}:00Z`,
-  cum_net_r: Number((Math.sin(i / 5) * 2 + i * 0.15).toFixed(2)),
+  cum_net_r: Number((Math.sin(i / 4) * 2.5 - 1 + i * 0.12).toFixed(2)),
 }));
 
 export const backtestRuns: T.BacktestRun[] = [

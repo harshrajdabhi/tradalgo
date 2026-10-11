@@ -1,18 +1,21 @@
 import { useEffect, useRef } from "react";
-import { createChart, ColorType, type IChartApi, type ISeriesApi } from "lightweight-charts";
+import {
+  createChart,
+  ColorType,
+  type IChartApi,
+  type IPriceLine,
+  type ISeriesApi,
+} from "lightweight-charts";
 import { useTheme } from "@mui/material/styles";
 import type { ReplayResponse } from "../../api/types";
+import { sessionSlots, visibleReplay } from "../../lib/visibleReplay";
 
-// lightweight-charts always renders time labels in UTC regardless of the
-// viewer's local timezone. Our timestamps are real IST wall-clock moments
-// stored as UTC epoch seconds, so without this shift the axis reads five
-// and a half hours early (e.g. "04:00" instead of "09:30"). Shifting every
-// timestamp fed to the chart by the IST offset makes the UTC-labelled axis
-// display the correct IST time — a display-only transform; state/logic
-// (replayStateAtPlayhead, formatIstTime) use the real timestamps untouched.
-const IST_OFFSET_SEC = 19800; // +5:30
+// lightweight-charts labels time in UTC regardless of viewer timezone; our
+// timestamps are IST moments as UTC epoch seconds, so shift for display only.
+const IST_OFFSET_SEC = 19800;
 const toChartTime = (t: number) => (t + IST_OFFSET_SEC) as never;
 
+// Neutral (ink) markers; sign colour lives on the R labels in the side panel.
 const MARKER_SHAPE: Record<string, "circle" | "arrowUp" | "arrowDown" | "square"> = {
   entry: "arrowUp",
   partial_exit: "circle",
@@ -20,6 +23,11 @@ const MARKER_SHAPE: Record<string, "circle" | "arrowUp" | "arrowDown" | "square"
   runner_exit: "arrowDown",
   stop_hit: "arrowDown",
   hard_exit: "arrowDown",
+};
+
+const withAlpha = (hex: string, a: number) => {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
 };
 
 export default function ReplayChart({
@@ -31,9 +39,14 @@ export default function ReplayChart({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const vwapRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const stopRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const linesRef = useRef<IPriceLine[]>([]);
+  const rangeSet = useRef(false);
   const theme = useTheme();
 
+  // Chart creation: full-session time axis, set once, never re-fitted.
   useEffect(() => {
     if (!ref.current) return;
     const t = theme.palette;
@@ -47,65 +60,42 @@ export default function ReplayChart({
       },
       grid: { vertLines: { color: t.divider }, horzLines: { color: t.divider } },
       rightPriceScale: { borderColor: t.divider },
-      timeScale: { borderColor: t.divider, timeVisible: true, secondsVisible: false },
+      timeScale: {
+        borderColor: t.divider,
+        timeVisible: true,
+        secondsVisible: false,
+        lockVisibleTimeRangeOnResize: true,
+      },
     });
     chartRef.current = chart;
 
-    const candleSeries = chart.addCandlestickSeries({
+    const candles = chart.addCandlestickSeries({
       upColor: t.success.main,
       downColor: t.error.main,
       borderVisible: false,
       wickUpColor: t.success.main,
       wickDownColor: t.error.main,
     });
-    seriesRef.current = candleSeries;
-
-    const vwapSeries = chart.addLineSeries({ color: "#5B7C99", lineWidth: 1, title: "VWAP" });
-    vwapSeries.setData(
-      replay.session_vwap.map((p) => ({ time: toChartTime(p.time), value: p.value }))
-    );
-
-    if (replay.stop_path && replay.stop_path.length > 0) {
-      const stopPathSeries = chart.addLineSeries({
-        color: t.error.main,
-        lineWidth: 1,
-        lineStyle: 3,
-        lineType: 1, // stepped
-        title: "trailed stop",
-      });
-      stopPathSeries.setData(
-        replay.stop_path.map((p) => ({ time: toChartTime(p.time), value: p.value }))
-      );
-    }
-
-    candleSeries.createPriceLine({
-      price: replay.levels.entry,
-      color: t.text.primary,
+    candleRef.current = candles;
+    vwapRef.current = chart.addLineSeries({
+      color: "#5B7C99",
       lineWidth: 1,
-      lineStyle: 2,
-      title: "entry",
+      title: "VWAP",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
-    candleSeries.createPriceLine({
-      price: replay.levels.stop,
-      color: t.error.main,
+    stopRef.current = chart.addLineSeries({
+      color: withAlpha(theme.palette.mode === "light" ? "#8C3B34" : "#D98E82", 0.55),
       lineWidth: 2,
-      lineStyle: 0,
-      title: "stop",
+      lineType: 1, // stepped
+      title: "trailing stop",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
-    candleSeries.createPriceLine({
-      price: replay.levels.target_partial,
-      color: t.success.main,
-      lineWidth: 1,
-      lineStyle: 0,
-      title: "partial",
-    });
-    candleSeries.createPriceLine({
-      price: replay.levels.target_runner,
-      color: t.success.main,
-      lineWidth: 1,
-      lineStyle: 1,
-      title: "runner",
-    });
+
+    const slots = sessionSlots(replay.candles[0]?.time ?? 0);
+    candles.setData(slots.map((s) => ({ time: toChartTime(s) })));
+    rangeSet.current = false;
 
     const onResize = () => {
       if (ref.current) chart.applyOptions({ width: ref.current.clientWidth });
@@ -114,36 +104,57 @@ export default function ReplayChart({
     return () => {
       window.removeEventListener("resize", onResize);
       chart.remove();
+      linesRef.current = [];
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [replay, theme]);
 
+  // Playhead: clip everything to time <= t.
   useEffect(() => {
-    const series = seriesRef.current;
-    const chart = chartRef.current;
-    if (!series || !chart) return;
-    const visible = replay.candles.slice(0, playheadIndex + 1);
-    series.setData(
-      visible.map((c) => ({
-        time: toChartTime(c.time),
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      }))
+    const candles = candleRef.current;
+    if (!candles || !vwapRef.current || !stopRef.current) return;
+    const t = theme.palette;
+    const tNow = replay.candles[Math.min(playheadIndex, replay.candles.length - 1)]?.time ?? 0;
+    const v = visibleReplay(replay, tNow);
+
+    const have = new Map(v.candles.map((c) => [c.time, c]));
+    candles.setData(
+      sessionSlots(replay.candles[0]?.time ?? 0).map((s) => {
+        const c = have.get(s);
+        return c
+          ? { time: toChartTime(s), open: c.open, high: c.high, low: c.low, close: c.close }
+          : { time: toChartTime(s) };
+      })
     );
-    const visibleTimes = new Set(visible.map((c) => c.time));
-    const markers = replay.markers
-      .filter((m) => visibleTimes.has(m.time))
-      .map((m) => ({
+    if (!rangeSet.current && chartRef.current) {
+      // Full session on the axis, set once per replay (no fitContent).
+      chartRef.current.timeScale().setVisibleLogicalRange({ from: -1, to: 76 });
+      rangeSet.current = true;
+    }
+    vwapRef.current.setData(v.vwap.map((p) => ({ time: toChartTime(p.time), value: p.value })));
+    stopRef.current.setData(v.stopPath.map((p) => ({ time: toChartTime(p.time), value: p.value })));
+
+    candles.setMarkers(
+      v.markers.map((m) => ({
         time: toChartTime(m.time),
         position: (m.kind === "entry" ? "belowBar" : "aboveBar") as "belowBar" | "aboveBar",
-        color: m.kind === "entry" ? theme.palette.text.primary : theme.palette.warning.main,
+        color: t.text.primary,
         shape: MARKER_SHAPE[m.kind] ?? "circle",
-        text: m.kind,
-      }));
-    series.setMarkers(markers);
-    chart.timeScale().fitContent();
+        text: m.kind.replace("_", " "),
+      }))
+    );
+
+    linesRef.current.forEach((l) => candles.removePriceLine(l));
+    linesRef.current = [];
+    if (v.levels) {
+      const mk = (price: number, color: string, lineStyle: number, title: string) =>
+        linesRef.current.push(
+          candles.createPriceLine({ price, color, lineWidth: 1, lineStyle, title })
+        );
+      mk(v.levels.entry, t.text.primary, 2, "entry");
+      mk(v.levels.stop, t.error.main, 0, "stop");
+      mk(v.levels.target_partial, t.success.main, 0, "partial");
+      mk(v.levels.target_runner, t.success.main, 1, "runner");
+    }
   }, [replay, playheadIndex, theme]);
 
   return <div ref={ref} style={{ width: "100%" }} />;

@@ -85,6 +85,9 @@ export default function ReplayView({
     function onKey(e: KeyboardEvent) {
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+      // Capture phase: stop focused Tabs/buttons from also reacting to
+      // Space and the arrow keys (MUI Tabs would move focus between tabs).
+      if (e.key === " " || e.key.startsWith("Arrow")) e.stopPropagation();
       if (e.key === " ") {
         e.preventDefault();
         setPlaying((p) => !p);
@@ -104,8 +107,15 @@ export default function ReplayView({
         onExit();
       }
     }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const stopSpaceClick = (e: KeyboardEvent) => {
+      if (e.key === " ") e.preventDefault();
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("keyup", stopSpaceClick, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keyup", stopSpaceClick, true);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [maxIndex, currentIdx, trades]);
 
@@ -217,6 +227,29 @@ export default function ReplayView({
                 </Grid>
                 <Grid item xs={6}>
                   <Typography sx={{ fontVariantNumeric: "tabular-nums" }}>{state.currentStop}</Typography>
+                </Grid>
+                <Grid item xs={12}>
+                  <Typography variant="caption" color="text.secondary">
+                    Events so far
+                  </Typography>
+                  {replay.markers
+                    .filter((m) => m.time <= state.time)
+                    .map((m, i) => (
+                      <Box key={i} sx={{ display: "flex", justifyContent: "space-between" }}>
+                        <Typography variant="body2">
+                          {formatIstTime(new Date(m.time * 1000).toISOString())} {m.kind.replace("_", " ")}
+                        </Typography>
+                        {m.kind !== "entry" && m.kind !== "trail_update" && (
+                          <Typography
+                            variant="body2"
+                            sx={{ fontVariantNumeric: "tabular-nums" }}
+                            color={m.r >= 0 ? "success.main" : "error.main"}
+                          >
+                            {formatR(m.r)}
+                          </Typography>
+                        )}
+                      </Box>
+                    ))}
                 </Grid>
                 <Grid item xs={12}>
                   <Typography variant="caption" color="text.secondary">

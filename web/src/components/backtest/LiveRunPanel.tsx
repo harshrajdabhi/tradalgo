@@ -7,6 +7,8 @@ import ListItem from "@mui/material/ListItem";
 import ListItemText from "@mui/material/ListItemText";
 import { LineChart } from "@mui/x-charts/LineChart";
 import { BarChart } from "@mui/x-charts/BarChart";
+import { ChartsReferenceLine } from "@mui/x-charts/ChartsReferenceLine";
+import { latestTradeRows } from "../../lib/latestTrades";
 import { useTheme } from "@mui/material/styles";
 import { LoadingBox, EmptyBox } from "../StateBox";
 import { formatR, formatPercent } from "../../lib/format";
@@ -36,6 +38,9 @@ export default function LiveRunPanel({
   if (loading && !data) return <LoadingBox label="Loading live run" rows={6} />;
   if (!data) return <EmptyBox text="No live data yet." />;
 
+  const curve = data.equity_curve.map((p) => p.cum_net_r);
+  const latest = latestTradeRows(data.latest_trades);
+
   return (
     <Box>
       <Grid container spacing={2} sx={{ mb: 3 }}>
@@ -60,14 +65,18 @@ export default function LiveRunPanel({
         height={220}
         series={[
           {
-            data: data.equity_curve.map((p) => p.cum_net_r),
+            data: curve,
             color: theme.palette.mode === "light" ? "#2E5C8A" : "#6FA0D6",
             showMark: false,
+            curve: "linear",
           },
         ]}
         xAxis={[{ data: data.equity_curve.map((p) => p.trade_index), scaleType: "point" }]}
+        yAxis={[{ min: Math.min(0, ...curve) - 0.5, max: Math.max(0, ...curve) + 0.5 }]}
         sx={{ mb: 3 }}
-      />
+      >
+        <ChartsReferenceLine y={0} lineStyle={{ stroke: theme.palette.divider, strokeDasharray: "4 4" }} />
+      </LineChart>
 
       <Grid container spacing={3}>
         <Grid item xs={12} md={6}>
@@ -117,15 +126,31 @@ export default function LiveRunPanel({
       <Typography variant="h6" sx={{ mt: 3, mb: 1 }}>
         Latest trades
       </Typography>
-      <Typography variant="body2" color="text.secondary">
-        {data.latest_trades
-          .map((t) => {
-            const r = t as { time?: string; symbol?: string; net_r?: number; exit_ts?: string };
-            const label = r.time ?? r.exit_ts ?? "";
-            return `${label} ${r.symbol ?? ""} ${r.net_r !== undefined ? formatR(r.net_r) : ""}`;
-          })
-          .join(" · ")}
-      </Typography>
+      {latest.length === 0 ? (
+        <Typography variant="body2" color="text.secondary">
+          No trades closed yet.
+        </Typography>
+      ) : (
+        <List dense>
+          {latest.map((t, i) => (
+            <ListItem key={i} divider>
+              <ListItemText
+                primary={`${t.time}  ${t.symbol}`}
+                secondary={t.strategy}
+                primaryTypographyProps={{ sx: { fontVariantNumeric: "tabular-nums" } }}
+              />
+              {t.netR !== null && (
+                <Typography
+                  sx={{ fontVariantNumeric: "tabular-nums" }}
+                  color={t.netR >= 0 ? "success.main" : "error.main"}
+                >
+                  {formatR(t.netR)}
+                </Typography>
+              )}
+            </ListItem>
+          ))}
+        </List>
+      )}
     </Box>
   );
 }

@@ -89,6 +89,7 @@ function buildTheme(mode: "light" | "dark"): ThemeOptions {
           outlined: { borderColor: t.line, color: t.inkMuted },
         },
       },
+      MuiButtonBase: { defaultProps: { disableRipple: true } },
       MuiTabs: {
         styleOverrides: {
           indicator: { backgroundColor: t.ink },
